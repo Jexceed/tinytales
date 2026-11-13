@@ -45,13 +45,15 @@ final class FakeStreamingModel: FakeModel, StreamingPartnerModel {
 }
 final class FakeIllustrator: FakeModel, StoryIllustratingModel {
     var illustrated: [Story] = []
+    var illustrationRequests: [IllustrationRequest] = []
     var illustrationDelay: UInt64 = 0
-    func illustrate(_ story:Story) async throws -> GeneratedArtwork {
-        illustrated.append(story)
+    func illustrate(_ request:IllustrationRequest) async throws -> GeneratedArtwork {
+        illustrationRequests.append(request)
+        if let story = request.story { illustrated.append(story) }
         if illustrationDelay > 0 { try await Task.sleep(nanoseconds:illustrationDelay) }
         let image=NSImage(size:NSSize(width:16,height:16));image.lockFocus();NSColor.purple.setFill();NSRect(x:0,y:0,width:16,height:16).fill();image.unlockFocus()
         let rep=NSBitmapImageRep(data:image.tiffRepresentation!)!
-        return GeneratedArtwork(data:rep.representation(using:.png,properties:[:])!,caption:"彩虹桥的尽头，有一只发光的小钟。")
+        return GeneratedArtwork(data:rep.representation(using:.png,properties:[:])!,caption:"彩虹桥的尽头，有一只发光的小钟。",source:request.story ?? Story(title:"对话里的画",summary:"小火车唱着歌走过小桥。"))
     }
 }
 func finish(_ text: String = "小恐龙在花园里看到一颗会发光的种子。你想让它长成什么呢？") -> ModelOutput {
@@ -92,6 +94,7 @@ func spriteAtlasFixture() throws -> URL {
 
 @main struct NativeTests {
     @MainActor static func main() async {
+        if CommandLine.arguments.contains("--artwork-eval") {await artworkComparisonLive();return}
         if CommandLine.arguments.contains("--teacher-live") {await teacherVoiceLive();return}
         if CommandLine.arguments.contains("--artwork-live") { await artworkLive(); return }
         if CommandLine.arguments.contains("--voice-live") { await voiceLive(); return }
@@ -506,7 +509,7 @@ func spriteAtlasFixture() throws -> URL {
             }),
             ("image tool sends actual curated image data back to the model", {
                 let store = try fixture(); defer { remove(store) }; let fake = FakeModel([tools([call("show_picture", ["id": "rain"])]), finish()])
-                let engine = CompanionEngine(store: store, model: fake, image: { _ in Data([1,2,3]) }); let result = try await engine.turn("我想看雨天的画")
+                let engine = CompanionEngine(store: store, model: fake, image: { _ in Data([1,2,3]) }); let result = try await engine.turn("我想看图库里雨天的画")
                 let output = fake.inputs[1].last!["output"] as! [[String: Any]]
                 try expect(result.sceneID == "rain", "scene not displayed"); try expect(output.contains { $0["type"] as? String == "input_image" }, "vision input missing")
             }),
@@ -832,6 +835,7 @@ func spriteAtlasFixture() throws -> URL {
         ]
         var failed = 0
         cases += petBehaviorTestCases()
+        cases += artworkTestCases()
         for (name, test) in cases { do { try await test(); print("PASS \(name)") } catch { failed += 1; print("FAIL \(name): \(error.localizedDescription)") } }
         print("Native tests: \(cases.count - failed)/\(cases.count) passed")
         if failed > 0 { exit(1) }
@@ -846,7 +850,7 @@ func spriteAtlasFixture() throws -> URL {
             guard let narrative=session.current else {throw PartnerError.message("TEST: narrative checkpoint missing")}
             let result=try await engine.turn("给我把刚刚的故事画出来吧。")
             guard let art=result.artwork else{throw PartnerError.message("TEST: illustration missing")};defer{ArtworkArchive.remove(art)}
-            try expect(art.storyID == narrative.id && art.storyText == narrative.summary,"live image changed source story")
+            try expect(art.storyID == narrative.id && art.storyText.contains("小钟"),"live image changed source story")
             try Data(contentsOf:art.url).write(to:URL(fileURLWithPath:"artifacts/v07-rainbow-clock.png"))
             let report:[String:Any]=["success":true,"syntheticOnly":true,"firstReply":first.reply.reply,"sourceStory":narrative.summary,"title":art.title,"caption":result.reply.reply,"storyID":art.storyID,"sourceHash":art.storyHash,"sameStoryAfterDrawing":session.current == narrative,"archivedStories":try store.stories().count]
             try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:"artifacts/v07-artwork-live.json"))

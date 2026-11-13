@@ -72,7 +72,13 @@ final class PetPanel: NSPanel {
         let popover = NSPopover(); popover.behavior = .transient; popover.contentSize = NSSize(width: 420, height: 350)
         popover.contentViewController = NSHostingController(rootView: PetQuickChat(model: model, voice: model.voice, openHouse: { [weak self] in self?.openHouse() }))
         self.popover = popover; popover.show(relativeTo: canvas.bounds, of: canvas, preferredEdge: .minX)
+        resizeQuickChat()
         popover.contentViewController?.view.window?.makeKey()
+    }
+    func resizeQuickChat() {
+        guard let popover, let view = popover.contentViewController?.view else { return }
+        view.layoutSubtreeIfNeeded()
+        popover.contentSize = NSSize(width:420,height:max(350,view.fittingSize.height))
     }
     func record() { guard let model else { return }; popover?.close(); if !model.cloudAvailable { openHouse(); model.showParent = true; return }; model.toggleCall() }
     func hide() { guard let model else { return }; var settings = model.settings; settings.desktopPetEnabled = false; model.updateSettings(settings) }
@@ -128,6 +134,8 @@ struct DesktopPetView: View {
             Group {
                 if model.inCall,let words=model.phone?.inputTranscript,!words.isEmpty {
                     Text("你说："+words).font(.system(size:15,weight:.medium,design:.rounded)).lineLimit(1).truncationMode(.tail).foregroundStyle(Color.ink).padding(.horizontal,8).help(words)
+                } else if !model.artworkActivity.isEmpty {
+                    HStack(spacing:6) { ProgressView().controlSize(.small); Text(model.artworkActivity).font(.system(size:14,weight:.medium,design:.rounded)).foregroundStyle(Color.ink) }
                 } else if model.inCall && visualMode == .speaking {
                     DuplexLevels(input:model.phone?.inputLevel ?? 0,output:model.phone?.outputLevel ?? 0,muted:model.phone?.muted == true).frame(height:25)
                 } else if visualMode != .idle {
@@ -159,6 +167,9 @@ struct PetQuickChat:View {
             HStack(spacing:9) {UnicornPicture().frame(width:30,height:34);Text("莉莉").font(.system(size:21,weight:.semibold,design:.rounded));Spacer();Button(action:openHouse) {Image(systemName:"arrow.up.left.and.arrow.down.right").font(.system(size:17)).padding(7)}.buttonStyle(.plain).help("打开对话")}
             Text(model.busy ? "莉莉在想…" : model.messages.last(where:{!$0.isUser && $0.source != "welcome"})?.text ?? (model.entryOrigin == .voice ? "莉莉在这里。" : "你好，想聊些什么？"))
                 .font(.system(size:18)).lineSpacing(5).lineLimit(4).frame(maxWidth:.infinity,minHeight:62,alignment:.topLeading)
+            if let art = model.messages.last(where:{!$0.isUser})?.artwork, let image = NSImage(contentsOf:art.url) {
+                Button(action:openHouse) { Image(nsImage:image).resizable().scaledToFit().frame(maxHeight:160).clipShape(RoundedRectangle(cornerRadius:12)) }.buttonStyle(.plain).help("打开这幅画")
+            }
             if model.showsOpeningOptions {OpeningOptions(model:model,compact:true)}
             if !model.error.isEmpty {Text(model.error).font(.system(size:14)).foregroundStyle(.orange).lineLimit(2)}
             HStack(spacing:10) {
@@ -177,5 +188,6 @@ struct PetQuickChat:View {
             .onAppear {inputFocused = !model.inCall}
             .onChange(of:model.inCall) {_,active in if active {inputFocused=false}}
             .onChange(of:model.draft) {_,text in if !text.isEmpty && !model.inCall {inputFocused=true}}
+            .onChange(of:model.messages.last(where:{!$0.isUser})?.artwork?.id) {_,_ in DesktopPetController.shared.resizeQuickChat()}
     }
 }

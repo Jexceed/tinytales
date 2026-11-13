@@ -69,8 +69,8 @@ import AppKit
             let store = try LocalStore(url: testMode ? fixtureDirectory.appendingPathComponent("view.sqlite") : nil)
             let previewCall:((LocalStore,String,String,StorySession)->RealtimeCall)?
             if testMode && args.contains("--sample-voice") {
-                let sample=args.contains("--sample-duplex") ? "duplex" : args.contains("--sample-voice-partial") ? "partial" : args.contains("--sample-voice-retry") ? "retry" : ""
-                previewCall={store,_,voice,session in RealtimeCall(store:store,wire:ConversationPreviewWire(sample:sample),audio:ConversationPreviewAudio(),permission:{true},voice:"shimmer",session:session)}
+                let sample=args.contains("--sample-drawing") ? "drawing" : args.contains("--sample-duplex") ? "duplex" : args.contains("--sample-voice-partial") ? "partial" : args.contains("--sample-voice-retry") ? "retry" : ""
+                previewCall={store,_,voice,session in RealtimeCall(store:store,wire:ConversationPreviewWire(sample:sample),audio:ConversationPreviewAudio(),permission:{true},voice:"shimmer",session:session,illustrator:sample == "drawing" ? {request in request.progress?("莉莉在画画…");try await Task.sleep(nanoseconds:30_000_000_000);throw CancellationError()} : nil)}
             } else {previewCall=nil}
             let model = testMode ? AppModel(store: store, keyProvider: { "ui-fixture-no-network" },callFactory:previewCall) : AppModel(store: store)
             if testMode { model.newConversation() }
@@ -108,6 +108,7 @@ import AppKit
             if testMode,args.contains("--sample-selected-story"),let story=model.stories.first(where:{$0.title=="彩虹桥的小钟"}) {model.selectConversation("archive:"+story.id)}
             if testMode,args.contains("--sample-switched-story"),let story=model.stories.first(where:{$0.title=="小熊送苹果"}) {model.selectConversation("archive:"+story.id)}
             if testMode,args.contains("--sample-voice") {model.toggleCall()}
+            if testMode,args.contains("--sample-drawing") { Task {try? await Task.sleep(nanoseconds:300_000_000);try? await model.phone?.sendText("画一辆红色小火车")} }
             if testMode,args.contains("--sample-voice-ended") {model.enterVoiceConversation()}
             if testMode, args.contains("--sample-story-choice") { model.openStory(ContentLibrary.books[0]) }
             if testMode, args.contains("--sample-long-chat") {
@@ -126,10 +127,16 @@ import AppKit
                 ]
             }
             if testMode, let index = args.firstIndex(of:"--sample-artwork"), args.count > index + 1 {
-                model.recordUserMessageSent("把彩虹桥小钟的故事画出来")
                 model.browsing = false
                 let data = try Data(contentsOf:URL(fileURLWithPath:args[index+1]))
-                let art = StoryArtwork(storyID:UUID().uuidString,title:"彩虹桥尽头的小钟",storyText:"小兔和小刺猬在彩虹桥上推开圆石，蘑菇旁的小钟发出金色的光。",caption:"小兔和小刺猬一起推着彩虹桥上的圆石，蘑菇旁的小钟正发着光。")
+                var art = StoryArtwork(storyID:UUID().uuidString,title:"彩虹桥尽头的小钟",storyText:"小兔和小刺猬在彩虹桥上推开圆石，蘑菇旁的小钟发出金色的光。",caption:"小兔和小刺猬一起推着彩虹桥上的圆石，蘑菇旁的小钟正发着光。")
+                if let i=args.firstIndex(of:"--sample-artwork-info"),args.count>i+1,
+                   let info=try JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:args[i+1]))) as? [String:Any] {
+                    art.title=info["title"] as? String ?? "对话里的画";art.storyText=info["source"] as? String ?? ""
+                    art.caption=info["caption"] as? String ?? "画好啦。"
+                    art.fileExtension=URL(fileURLWithPath:args[index+1]).pathExtension == "jpg" ? "jpg" : "png"
+                }
+                model.recordUserMessageSent("画一张" + art.title)
                 try ArtworkArchive.save(art,data:data)
                 model.messages.append(ChatMessage(isUser:false,text:art.caption,artwork:art))
             }
@@ -233,7 +240,7 @@ import AppKit
                     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("report.json"))
                 } catch { fputs("Pet diagnostics: \(error.localizedDescription)\n", stderr) }
             }
-            let result: [String: Any] = ["success": !windows.isEmpty && (!model.settings.desktopPetEnabled || DesktopPetController.shared.isVisible),"desktopPetEnabled":model.settings.desktopPetEnabled, "bundleID": Bundle.main.bundleIdentifier ?? "", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "", "connectionAvailable": model.cloudAvailable, "fixture": args.contains("--verify-launch"), "voiceStyle":model.settings.voiceStyle, "storyArtworkCount":model.messages.filter { $0.artwork != nil }.count,"entryOrigin":model.entryOrigin == .voice ? "voice" : "text","openingOptions":model.showsOpeningOptions ? OpeningPrompt.allCases.count : 0,"callActive":model.inCall,"callState":model.phone?.state.rawValue ?? "ended","inputTranscriptPresent":!(model.phone?.inputTranscript.isEmpty ?? true),"listeningHintPresent":!(model.phone?.listeningHint.isEmpty ?? true),"placeholderUserMessages":model.messages.filter{$0.isUser && ($0.text=="…" || $0.text=="...")}.count,"quickChatSnapshotSaved":quickChatCaptured,"contentLobbyVisible":false,"sidebarVisible":true,"sidebarStoryCount":model.stories.count,"sidebarConversationCount":model.conversations.count,"sidebarOrder":model.conversations.map(\.navigationID),"sidebarTitleOrder":args.contains("--verify-launch") ? model.conversations.map(\.title) : [],"conversationStarted":model.isConversationStarted,"draftPresent":!model.draft.isEmpty,"selectedConversationID":model.isConversationStarted ? model.selectedConversationID : "","selectedConversationTitle":model.isConversationStarted ? model.conversationTitle : "","headerTitle":model.isConversationStarted ? model.conversationTitle : "莉莉","selectedRowCount":model.conversations.filter{$0.id == model.selectedConversationID}.count, "reopened": args.contains("--verify-reopen"), "snapshotSaved": captured, "petSnapshotSaved": petCaptured, "desktopPet": DesktopPetController.shared.verification, "windows": windows.map { ["title": $0.title, "width": $0.frame.width, "height": $0.frame.height] }]
+            let result: [String: Any] = ["success": !windows.isEmpty && (!model.settings.desktopPetEnabled || DesktopPetController.shared.isVisible),"desktopPetEnabled":model.settings.desktopPetEnabled, "bundleID": Bundle.main.bundleIdentifier ?? "", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "", "connectionAvailable": model.cloudAvailable, "fixture": args.contains("--verify-launch"), "voiceStyle":model.settings.voiceStyle, "storyArtworkCount":model.messages.filter { $0.artwork != nil }.count,"artworkInProgress":!(model.phone?.artworkStatus.isEmpty ?? true),"entryOrigin":model.entryOrigin == .voice ? "voice" : "text","openingOptions":model.showsOpeningOptions ? OpeningPrompt.allCases.count : 0,"callActive":model.inCall,"callState":model.phone?.state.rawValue ?? "ended","inputTranscriptPresent":!(model.phone?.inputTranscript.isEmpty ?? true),"listeningHintPresent":!(model.phone?.listeningHint.isEmpty ?? true),"placeholderUserMessages":model.messages.filter{$0.isUser && ($0.text=="…" || $0.text=="...")}.count,"quickChatSnapshotSaved":quickChatCaptured,"contentLobbyVisible":false,"sidebarVisible":true,"sidebarStoryCount":model.stories.count,"sidebarConversationCount":model.conversations.count,"sidebarOrder":model.conversations.map(\.navigationID),"sidebarTitleOrder":args.contains("--verify-launch") ? model.conversations.map(\.title) : [],"conversationStarted":model.isConversationStarted,"draftPresent":!model.draft.isEmpty,"selectedConversationID":model.isConversationStarted ? model.selectedConversationID : "","selectedConversationTitle":model.isConversationStarted ? model.conversationTitle : "","headerTitle":model.isConversationStarted ? model.conversationTitle : "莉莉","selectedRowCount":model.conversations.filter{$0.id == model.selectedConversationID}.count, "reopened": args.contains("--verify-reopen"), "snapshotSaved": captured, "petSnapshotSaved": petCaptured, "desktopPet": DesktopPetController.shared.verification, "windows": windows.map { ["title": $0.title, "width": $0.frame.width, "height": $0.frame.height] }]
             try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: args[index + 1]))
             if args.contains("--verify-launch") { for message in model.messages { if let art = message.artwork { ArtworkArchive.remove(art) } }; NSApplication.shared.terminate(nil) }
         }

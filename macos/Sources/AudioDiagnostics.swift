@@ -119,6 +119,12 @@ import AppKit
     }
     func send(_ event:[String:Any]) async throws {
         guard !closed else {return}
+        if event["type"] as? String=="response.create",sample=="drawing" {
+            guard let response=event["response"] as? [String:Any],response["tool_choice"] != nil else{return}
+            onEvent?(["type":"response.created","response":["id":"drawing-preview"]])
+            onEvent?(["type":"response.done","response":["id":"drawing-preview","status":"completed","output":[["type":"function_call","name":"illustrate_story","call_id":"drawing-tool","arguments":"{}"]]]])
+            return
+        }
         if event["type"] as? String=="response.create",sample=="duplex" {
             onEvent?(["type":"response.created","response":["id":"duplex-preview"]])
             onEvent?(["type":"response.output_audio_transcript.delta","response_id":"duplex-preview","item_id":"preview-speech","delta":"小兔抱着苹果，慢慢走向奶奶的家。"])
@@ -127,7 +133,7 @@ import AppKit
         }
         if event["type"] as? String == "session.update" {
             onEvent?(["type":"session.updated"])
-            guard !sample.isEmpty,sample != "duplex" else{return}
+            guard !sample.isEmpty,sample != "duplex",sample != "drawing" else{return}
             Task {@MainActor [weak self] in
                 try? await Task.sleep(nanoseconds:150_000_000)
                 guard let self,!self.closed else{return}

@@ -98,6 +98,7 @@ func wav(_ pcm: Data) -> Data {
 }
 @main struct PhoneTests {
     @MainActor static func main() async {
+        if CommandLine.arguments.contains("--artwork-live") {await artworkPhoneLive();return}
         if CommandLine.arguments.contains("--voice-intent-live") {await voiceIntentLive();return}
         if CommandLine.arguments.contains("--duplex-live") || CommandLine.arguments.contains("--turns-live") {await duplexLive();return}
         if CommandLine.arguments.contains("--voice-eval") {await voiceRecognitionEvaluation();return}
@@ -196,6 +197,53 @@ func wav(_ pcm: Data) -> Data {
                 do{_=try await cancelled.value;throw PartnerError.message("TEST: cancelled narration accepted")}catch{try require(error is CancellationError,"cancellation not surfaced")}
                 try require(other.closed,"cancelled socket left open")
             }),
+            ("AI-002 phone drawing uses actual recent dialogue without a saved narrative", {
+                let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio(),session=StorySession()
+                let image=NSImage(size:NSSize(width:16,height:16));image.lockFocus();NSColor.orange.setFill();NSRect(x:0,y:0,width:16,height:16).fill();image.unlockFocus()
+                let png=NSBitmapImageRep(data:image.tiffRepresentation!)!.representation(using:.png,properties:[:])!
+                var captured:IllustrationRequest?,art:StoryArtwork?,published=0
+                let call=RealtimeCall(store:store,wire:wire,audio:audio,session:session,illustrator:{request in
+                    captured=request
+                    return GeneratedArtwork(data:png,caption:"红色小火车走过小桥。",source:Story(title:"小火车",summary:"红色小火车走过小桥。"))
+                },inputCommitDelay:0)
+                call.onArtwork={_,value in art=value};call.onAssistantText={_,_,_,_,_ in published+=1}
+                defer{call.hangUp();if let art{ArtworkArchive.remove(art)}}
+                try await call.connect(history:[],microphone:false,greet:false)
+                wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+                try await call.sendText("会唱歌的小火车")
+                wire.emit(["type":"response.created","response":["id":"train-r"]]);await settle()
+                wire.emit(["type":"response.done","response":["id":"train-r","status":"completed","output":[["type":"message","id":"train-a","content":[["text":"小火车唱着歌过桥，水像镜子一样。"]]]]]]);await settle()
+                try require(session.current == nil,"fixture unexpectedly had a saved story")
+                wire.emit(["type":"input_audio_buffer.speech_started","item_id":"draw-input"]);await settle()
+                await wire.finishInput("draw-input","我说你画图吧，还是我要看一张图。")
+                let response=wire.sent.last?["response"] as? [String:Any]
+                try require((response?["tool_choice"] as? [String:String])?["name"] == "illustrate_story","drawing tool not required")
+                wire.emit(["type":"response.created","response":["id":"draw-r"]]);await settle()
+                wire.emit(["type":"response.done","response":["id":"draw-r","status":"completed","output":[["type":"function_call","name":"illustrate_story","call_id":"draw-t","arguments":"{}"]]]]);await settle()
+                try require(captured?.dialogue.contains{$0["text"]?.contains("水像镜子") == true} == true,"lost conversational source")
+                try require(art != nil && published == 2,"image waited for an unnecessary second model answer")
+                try require(try store.stories().isEmpty,"drawing invented an archive")
+            }),
+            ("AI-004 AI-007 slow phone artwork shows progress keeps capture active and cancels on hangup", {
+                let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio()
+                var started=false,cancelled=false,published=false
+                let call=RealtimeCall(store:store,wire:wire,audio:audio,illustrator:{request in
+                    request.progress?("莉莉在画画…");started=true
+                    do {try await Task.sleep(nanoseconds:2_000_000_000)} catch {cancelled=true;throw error}
+                    throw PartnerError.message("must be cancelled")
+                })
+                call.onArtwork={_,_ in published=true};defer{call.hangUp()}
+                try await call.connect(history:[],microphone:false,greet:false)
+                wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+                try await call.sendText("画一辆小火车")
+                wire.emit(["type":"response.created","response":["id":"slow-r"]]);await settle()
+                wire.emit(["type":"response.done","response":["id":"slow-r","status":"completed","output":[["type":"function_call","name":"illustrate_story","call_id":"slow-t","arguments":"{}"]]]]);await settle()
+                try require(started && !call.artworkStatus.isEmpty,"missing drawing progress")
+                audio.onMicrophone?(Data(repeating:1,count:1920));await settle()
+                try require(!wire.deliveredAudio.isEmpty,"generation blocked microphone upload")
+                call.hangUp();await settle()
+                try require(cancelled && !published && call.artworkStatus.isEmpty,"hangup left a render running or published late")
+            }),
             ("phone illustration returns the picture tied to the current story", {
                 let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio(),session=StorySession()
                 let story=Story(title:"彩虹小钟",summary:"彩虹桥尽头的小钟发着光。")
@@ -203,7 +251,7 @@ func wav(_ pcm: Data) -> Data {
                 let image=NSImage(size:NSSize(width:16,height:16));image.lockFocus();NSColor.yellow.setFill();NSRect(x:0,y:0,width:16,height:16).fill();image.unlockFocus()
                 let png=NSBitmapImageRep(data:image.tiffRepresentation!)!.representation(using:.png,properties:[:])!
                 var source:Story?,art:StoryArtwork?
-                let call=RealtimeCall(store:store,wire:wire,audio:audio,session:session,illustrator:{ input in source=input;return GeneratedArtwork(data:png,caption:"彩虹桥尽头的小钟正在发光。") })
+                let call=RealtimeCall(store:store,wire:wire,audio:audio,session:session,illustrator:{ input in source=input.story;return GeneratedArtwork(data:png,caption:"彩虹桥尽头的小钟正在发光。") })
                 call.onArtwork={_,value in art=value}
                 defer{call.hangUp();if let art{ArtworkArchive.remove(art)}}
                 try await call.connect(history:[],microphone:false,greet:false)

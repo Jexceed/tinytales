@@ -15,7 +15,7 @@ if(['test','live','tts-test','phone-test','phone-live','greeting-live','story-li
   const phone=command.startsWith('phone-');
   const evaluation=command==='content-eval';
   const target=join(root,`build/native/${evaluation?'ContentEvals':phone?'PhoneTests':'NativeTests'}`);
-  const extraTests=phone?['VoiceTurnTests.swift','TeacherSpeechTests.swift','NaturalTurnTests.swift','NaturalTurnLive.swift','DuplexLive.swift','VoiceLiveTests.swift']:evaluation?[]:['TeacherVoiceEvals.swift','PetBehaviorTests.swift'];
+  const extraTests=phone?['VoiceTurnTests.swift','TeacherSpeechTests.swift','NaturalTurnTests.swift','NaturalTurnLive.swift','DuplexLive.swift','VoiceLiveTests.swift','ArtworkPhoneLive.swift']:evaluation?[]:['TeacherVoiceEvals.swift','PetBehaviorTests.swift','ArtworkTests.swift','ArtworkLive.swift'];
   run('xcrun',['swiftc',...flags,...core,join(root,`macos/Tests/${evaluation?'ContentEvals':phone?'PhoneTests':'NativeTests'}.swift`),...extraTests.map(f=>join(root,'macos/Tests',f)),'-o',target]);
   run(target,evaluation?process.argv.slice(3):command==='live'||command==='phone-live'?['--live']:command==='tts-test'?['--tts-local']:command==='greeting-live'?['--greeting-live']:command==='story-live'?['--story-live']:command==='experience-live'?['--experience-live']:[]);
 }else{

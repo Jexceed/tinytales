@@ -10,6 +10,7 @@
 - [双工倾听与自然话轮](specs/001-natural-voice-turns/spec.md)：语音决策、实现边界及验收证据。
 - [莉莉的桌面陪伴行为](specs/002-lily-pet-behaviors/spec.md)：空闲动作、摸摸回应、安静陪伴及验收证据。
 - [莉莉的人物描述](specs/003-lily-persona/spec.md)：文字与电话共用的性情、表达和相处方式。
+- [对话里的画图](specs/004-conversation-artwork/spec.md)：无需先保存故事，直接从对话或指定主体出图，含画质与耗时验证。
 - [轻量 SDD 约定](AGENTS.md)：先更新相关规格，再实现和验证；一个功能维护一份当前 `spec.md`。
 
 验收 ID 对应可运行的回归测试。构建和测试前检查规格链接及测试追踪，避免重要决定只存在于聊天记录或过期说明里。
@@ -25,6 +26,7 @@
 - 莉莉空闲时会看书、张望、伸懒腰、轻轻摇摆、玩星星，休息久了会眯一小会儿。靠近会招呼，鼠标在身上轻轻来回移动可以摸摸她；右键也能“摸摸莉莉”“一起玩星星”。单击聊天、双击打开对话、拖动摆放。
 - 右键“安静陪伴”或关闭设置里的“空闲小动作”，可停止自发动作。通话和聊天状态优先；动作不会自动出声或发送消息，并遵循系统“减少动态效果”。
 - 可以自然要求续讲、画刚才的故事、看图库或解释词汇，不需要切换产品模式。
+- 说“你画图吧”或指定想看的主体，就会实际生成图片，不要求先讲完并保存故事。默认提供精细绘本画面，生成期间显示进度；主窗口直接显示成图，桌宠聊天里也能预览。
 
 连接保存一次后复用，更新不重复索要密钥或麦克风授权。没有账号登录或日常算术验证。普通聊天不要求先找大人；云端调用只统计，没有每日 60 次上限。
 
@@ -50,6 +52,8 @@ build/native/PhoneTests --duplex-live
 build/native/PhoneTests --voice-intent-live
 build/native/PhoneTests --voice-eval interrupt --teacher
 build/native/NativeTests --teacher-live
+build/native/NativeTests --artwork-eval flare-high
+build/native/PhoneTests --artwork-live
 ```
 
 真实接口回放、物理设备和用户听感分别记录，不把合成测试当作全部现场条件的验收。若终端代理与 GUI 不同，应使用与 GUI 一致的网络设置。

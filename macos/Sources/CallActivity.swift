@@ -20,7 +20,8 @@ enum CallVisualMode: String, CaseIterable {
 extension AppModel {
     var callVisualMode: CallVisualMode { .resolve(phone?.state, muted: phone?.muted == true) }
     var callVisualLevel: Double { callVisualMode == .speaking ? phone?.outputLevel ?? 0 : phone?.inputLevel ?? 0 }
-    var callStatusTitle:String {phone?.state == .speaking && phone?.muted != true ? "莉莉在讲，也在听" : callVisualMode.label}
+    var artworkActivity: String { phone?.artworkStatus ?? "" }
+    var callStatusTitle:String { !artworkActivity.isEmpty ? artworkActivity : phone?.state == .speaking && phone?.muted != true ? "莉莉在讲，也在听" : callVisualMode.label }
 }
 struct DuplexLevels:View {
     var input:Double

@@ -18,19 +18,22 @@ struct PartnerToolResult {
     var activities: [String] = []
     var selectedStory: String?
     let session: StorySession
-    let illustrator: ((Story) async throws -> GeneratedArtwork)?
+    let illustrator: ((IllustrationRequest) async throws -> GeneratedArtwork)?
+    let recentDialogue: [[String: String]]
+    var onActivity: ((String) -> Void)?
     var selectedNarrative: Story?
     var selectedArtwork: StoryArtwork?
     var artworkCaption: String?
     private var artworkData: Data?
     private var pendingNarrative: Story?
     var preparedNarrative:Story? {pendingNarrative}
-    init(store: LocalStore, text: String, activeStory: String? = nil, session: StorySession? = nil, illustrator: ((Story) async throws -> GeneratedArtwork)? = nil, image: @escaping (String) throws -> Data? = { id in
+    init(store: LocalStore, text: String, activeStory: String? = nil, session: StorySession? = nil, history: [[String: Any]] = [], illustrator: ((IllustrationRequest) async throws -> GeneratedArtwork)? = nil, image: @escaping (String) throws -> Data? = { id in
         guard let scene = Scene.all.first(where: { $0.id == id }), let url = scene.visionURL else { return nil }
         return try Data(contentsOf: url)
     }) throws {
         self.store = store; settings = try store.settings(); self.text = text; self.image = image
         self.session = session ?? StorySession(); self.illustrator = illustrator
+        recentDialogue = IllustrationRequest.dialogue(from: history)
         selectedStory = self.session.current?.id ?? activeStory; selectedNarrative = self.session.current
     }
     func execute(name: String, args: [String: Any]) throws -> PartnerToolResult {
@@ -91,13 +94,15 @@ struct PartnerToolResult {
     }
     func perform(name: String, args: [String:Any]) async throws -> PartnerToolResult {
         guard name == "illustrate_story" else { return try execute(name:name,args:args) }
-        guard StoryIntent.illustration(text) else {return PartnerToolResult(output:["error":"no_illustration_requested","reason":"用户要继续讲故事，尚未要求画图。请直接完成故事叙述。"],image:nil)}
+        guard !StoryIntent.excludesDrawing(text) else {return PartnerToolResult(output:["error":"no_illustration_requested","reason":"用户没有要求实际生成图片。请回应本轮聊天或故事请求。"],image:nil)}
         if let art = selectedArtwork, let data = artworkData { return PartnerToolResult(output:["title":art.title,"caption":artworkCaption ?? ""],image:data) }
-        guard let story = selectedNarrative ?? session.current else { throw PartnerError.message("这段故事还没有留在故事本里。选一个故事，或把想画的那一段告诉莉莉吧。") }
         guard let illustrator else { throw PartnerError.message("画画暂时没有连上，请稍后再试。") }
-        let generated = try await illustrator(story)
+        let request = IllustrationRequest(text: text, story: selectedNarrative ?? session.current, dialogue: recentDialogue, progress: { [weak self] value in self?.onActivity?(value) })
+        onActivity?("莉莉在选画面…")
+        let generated = try await illustrator(request)
         try Task.checkCancellation()
-        selectedArtwork = StoryArtwork(storyID:story.id,title:story.title,storyText:story.summary,caption:generated.caption)
+        guard let story = generated.source ?? request.story else { throw PartnerError.message("你想画什么呀？告诉莉莉一个主角就可以。") }
+        selectedArtwork = StoryArtwork(storyID:story.id,title:story.title,storyText:story.summary,caption:generated.caption,fileExtension:generated.fileExtension)
         artworkData = generated.data; artworkCaption = generated.caption
         activities.append("画出了《\(story.title)》")
         return PartnerToolResult(output:["title":story.title,"source_story":story.summary,"verified_caption":generated.caption,"story_id":story.id],image:generated.data)

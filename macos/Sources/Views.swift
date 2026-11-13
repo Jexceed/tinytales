@@ -102,8 +102,8 @@ struct MainView:View {
                             MessageView(message:message,onRead:message.isStreaming || model.inCall ? nil : {model.voice.speak(message.text)})
                                 .id(message.id)
                         }
-                        if model.busy && !conversation.contains(where:{$0.isStreaming}) {
-                            HStack(spacing:10) {ProgressView().controlSize(.small);Text(model.activity.isEmpty ? "莉莉在想…" : model.activity).font(.system(size:16)).foregroundStyle(Color.quiet)}.padding(.vertical,12)
+                        if (model.busy && !conversation.contains(where:{$0.isStreaming})) || !model.artworkActivity.isEmpty {
+                            HStack(spacing:10) {ProgressView().controlSize(.small);Text(!model.artworkActivity.isEmpty ? model.artworkActivity : model.activity.isEmpty ? "莉莉在想…" : model.activity).font(.system(size:16)).foregroundStyle(Color.quiet)}.padding(.vertical,12)
                         }
                         Color.clear.frame(height:1).id("end")
                     }.padding(.horizontal,28).padding(.vertical,20).frame(maxWidth:820).frame(maxWidth:.infinity)
