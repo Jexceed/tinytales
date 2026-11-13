@@ -1,0 +1,230 @@
+import SwiftUI
+import AppKit
+
+@MainActor enum StoryArt {
+    private static let images:[String:NSImage] = Dictionary(uniqueKeysWithValues:Scene.all.compactMap { scene in
+        guard let url=scene.url,let image=NSImage(contentsOf:url) else{return nil}
+        return (scene.id,image)
+    })
+    static func image(_ id:String)->NSImage? { images[id] }
+}
+struct WorldIllustration:View {
+    var id:String
+    var body:some View {
+        GeometryReader { geometry in
+            if let image=StoryArt.image(id) { Image(nsImage:image).resizable().scaledToFill().frame(width:geometry.size.width,height:geometry.size.height).clipped() }
+        }.accessibilityHidden(true)
+    }
+}
+struct ThemeSelector:View {
+    @Binding var selected:StoryTheme
+    var neutral=false
+    var onChoose:(()->Void)? = nil
+    var body:some View {
+        ScrollView(.horizontal,showsIndicators:false) {
+            HStack(spacing:8) {
+                ForEach(StoryTheme.allCases) { theme in
+                    Button {selected=theme;onChoose?()} label: {
+                        Label(theme.title,systemImage:theme.icon).font(.system(size:15,weight:.semibold,design:.rounded))
+                            .padding(.horizontal,12).padding(.vertical,10)
+                            .foregroundStyle(!neutral && selected == theme ? .white : Color.quiet)
+                            .background(!neutral && selected == theme ? Color.sage : Color.white.opacity(0.75),in:Capsule())
+                    }.buttonStyle(StoryButtonStyle()).accessibilityAddTraits(!neutral && selected == theme ? [.isSelected] : [])
+                }
+            }.padding(.vertical,3)
+        }
+    }
+}
+struct SectionTitle:View {
+    var title:String
+    var icon:String
+    var body:some View { Label(title,systemImage:icon).font(.system(size:21,weight:.bold,design:.rounded)) }
+}
+struct StoryCoverCard:View {
+    var book:StoryStarter
+    var selected=false
+    var action:()->Void
+    var body:some View {
+        Button(action:action) {
+            VStack(alignment:.leading,spacing:0) {
+                WorldIllustration(id:book.theme.sceneID).frame(height:126)
+                    .overlay(alignment:.bottomLeading) { Image(systemName:book.icon).font(.system(size:16)).foregroundStyle(.white).padding(8).background(.black.opacity(0.18),in:Circle()).padding(9) }
+                VStack(alignment:.leading,spacing:7) {
+                    HStack(alignment:.top) {
+                        Text(book.title).font(.system(size:18,weight:.bold,design:.rounded)).lineLimit(2)
+                        Spacer(minLength:2)
+                        Image(systemName:selected ? "checkmark.circle.fill" : "arrow.up.right").font(.system(size:16,weight:.semibold)).foregroundStyle(Color.sage)
+                    }
+                    Text(book.opening).font(.system(size:15)).foregroundStyle(Color.quiet).lineLimit(2).lineSpacing(3)
+                }.padding(13).frame(maxWidth:.infinity,alignment:.leading)
+            }.background(.white).clipShape(RoundedRectangle(cornerRadius:18))
+                .overlay(RoundedRectangle(cornerRadius:18).strokeBorder(selected ? Color.sage : Color.lilacEdge.opacity(0.3),lineWidth:selected ? 2 : 1))
+                .shadow(color:Color.sage.opacity(0.08),radius:8,x:0,y:3)
+                .contentShape(RoundedRectangle(cornerRadius:18))
+        }.buttonStyle(StoryButtonStyle())
+    }
+}
+struct LibraryHomeView:View {
+    @ObservedObject var model:AppModel
+    @State private var theme=StoryTheme.forest
+    @State private var showAll=true
+    @State private var discovery:Discovery?
+    @State private var picture:Scene?
+    @State private var word:PocketWord?
+    private var books:[StoryStarter] {showAll ? StoryTheme.allCases.compactMap{theme in ContentLibrary.books.first{$0.theme==theme}} : ContentLibrary.books.filter{$0.theme==theme}}
+    var body:some View {
+        VStack(alignment:.leading,spacing:23) {
+            featured
+            VStack(alignment:.leading,spacing:13) {
+                HStack {
+                    SectionTitle(title:"故事从这里开始",icon:"books.vertical.fill")
+                    Spacer()
+                    Button("更多故事") {model.beginStory()}.font(.system(size:15,weight:.semibold)).buttonStyle(.plain).foregroundStyle(Color.sage)
+                }
+                HStack(spacing:8) {
+                    Button("随便逛逛"){showAll=true}.font(.system(size:15,weight:.semibold)).padding(.horizontal,12).padding(.vertical,10).foregroundStyle(showAll ? .white : Color.quiet).background(showAll ? Color.sage : .white,in:Capsule()).buttonStyle(.plain)
+                    ThemeSelector(selected:$theme,neutral:showAll,onChoose:{showAll=false})
+                }
+                LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:14),count:3),spacing:14) {
+                    ForEach(Array(books.dropFirst().prefix(3))) {book in StoryCoverCard(book:book){model.openStory(book)}}
+                }
+            }
+            if let story=model.stories.first {
+                Button {model.preparePrompt("我们继续《\(story.title)》的故事。")} label: {
+                    HStack(spacing:14) {
+                        StoryBooks().scaleEffect(0.65).frame(width:65,height:54)
+                        VStack(alignment:.leading,spacing:5) { Text("接着上次的冒险").font(.system(size:15,weight:.medium)).foregroundStyle(Color.quiet);Text(story.title).font(.system(size:19,weight:.bold,design:.rounded)) }
+                        Spacer();Image(systemName:"arrow.right.circle.fill").font(.system(size:27)).foregroundStyle(Color.sage)
+                    }.padding(14).background(.white,in:RoundedRectangle(cornerRadius:18)).overlay(RoundedRectangle(cornerRadius:18).stroke(Color.lilacEdge.opacity(0.3)))
+                }.buttonStyle(StoryButtonStyle())
+            }
+            VStack(alignment:.leading,spacing:14) {
+                SectionTitle(title:"一起发现为什么",icon:"lightbulb.fill")
+                LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:12),count:3),spacing:12) {
+                    ForEach(ContentLibrary.discoveries) { item in
+                        Button {discovery=item} label: {
+                            HStack(alignment:.top,spacing:11) {
+                                Image(systemName:item.icon).font(.system(size:24)).foregroundStyle(Color.sage).frame(width:31,height:37)
+                                VStack(alignment:.leading,spacing:7) {Text(item.title).font(.system(size:16,weight:.bold,design:.rounded));Text(item.question).font(.system(size:14)).foregroundStyle(Color.quiet).lineLimit(2)}
+                                Spacer(minLength:0)
+                            }.padding(14).frame(maxWidth:.infinity,minHeight:92,alignment:.leading).background(.white.opacity(0.8),in:RoundedRectangle(cornerRadius:16)).overlay(RoundedRectangle(cornerRadius:16).stroke(Color.lilacEdge.opacity(0.25)))
+                        }.buttonStyle(StoryButtonStyle())
+                    }
+                }
+            }
+            VStack(alignment:.leading,spacing:14) {
+                SectionTitle(title:"看图，发现一个故事",icon:"photo.on.rectangle.angled")
+                LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:14),count:3),spacing:14) {
+                    ForEach(StoryTheme.allCases) {theme in
+                        if let scene=Scene.all.first(where:{$0.id==theme.sceneID}) {
+                            Button {picture=scene} label: {
+                                ZStack(alignment:.bottomLeading) {
+                                    WorldIllustration(id:scene.id).frame(height:138)
+                                    LinearGradient(colors:[.clear,.black.opacity(0.6)],startPoint:.center,endPoint:.bottom)
+                                    Text(scene.title).font(.system(size:17,weight:.bold,design:.rounded)).foregroundStyle(.white).padding(13)
+                                }.frame(height:138).clipShape(RoundedRectangle(cornerRadius:17))
+                            }.buttonStyle(StoryButtonStyle())
+                        }
+                    }
+                }
+            }
+            VStack(alignment:.leading,spacing:14) {
+                SectionTitle(title:"故事里的词语宝盒",icon:"character.book.closed.fill")
+                LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:10),count:6),spacing:10) {
+                    ForEach(ContentLibrary.words) {item in
+                        Button {word=item} label: {
+                            VStack(spacing:7) {Text(item.hanzi).font(.system(size:22,weight:.bold,design:.rounded));Text(item.english).font(.system(size:14,weight:.medium)).foregroundStyle(Color.quiet)}
+                                .frame(maxWidth:.infinity,minHeight:78).background(.white,in:RoundedRectangle(cornerRadius:14)).overlay(RoundedRectangle(cornerRadius:14).stroke(Color.peachEdge.opacity(0.4)))
+                        }.buttonStyle(StoryButtonStyle())
+                    }
+                }
+            }
+        }.sheet(item:$discovery) {item in
+            ExplorationSheet(title:item.title,icon:item.icon,text:item.question,primary:"和莉莉一起发现") {model.preparePrompt(item.prompt);discovery=nil}
+        }.sheet(item:$picture) {scene in
+            VStack(alignment:.leading,spacing:20) {
+                HStack {Text(scene.title).font(.system(size:24,weight:.bold,design:.rounded));Spacer();Button("返回"){picture=nil}.buttonStyle(.plain)}
+                WorldIllustration(id:scene.id).frame(height:350).clipShape(RoundedRectangle(cornerRadius:20))
+                Text("你先看到了谁？它可能正在做什么？").font(.system(size:19)).lineSpacing(5)
+                Button("和莉莉聊这张图") {model.preparePrompt("我想看图库里的《\(scene.title)》这张图，和你聊聊图片里的故事。");picture=nil}.buttonStyle(.borderedProminent).tint(Color.sage).controlSize(.large)
+            }.padding(28).frame(width:620).background(Color.paper)
+        }.sheet(item:$word) {item in
+            VStack(spacing:22) {
+                HStack {Spacer();Button("返回"){word=nil}.buttonStyle(.plain)}
+                Text(item.pinyin).font(.system(size:21)).foregroundStyle(Color.quiet)
+                Text(item.hanzi).font(.system(size:58,weight:.bold,design:.rounded)).tracking(8)
+                Text(item.english).font(.system(size:27,weight:.semibold,design:.rounded)).foregroundStyle(Color.sage)
+                Text(item.example).font(.system(size:20)).multilineTextAlignment(.center).lineSpacing(6)
+                HStack(spacing:16) {
+                    Button {model.voice.speak("\(item.hanzi)。\(item.english)。\(item.example)")} label:{Label("听一听",systemImage:"speaker.wave.2.fill")}.buttonStyle(.bordered).controlSize(.large)
+                    Button("聊聊这个词") {model.preparePrompt("和我聊聊“\(item.hanzi)”这个词，也可以说一遍它的英语\(item.english)。");word=nil}.buttonStyle(.borderedProminent).tint(Color.sage).controlSize(.large)
+                }
+            }.padding(30).frame(width:500).background(Color.paper)
+        }
+    }
+    private var featured:some View {
+        HStack(spacing:0) {
+            VStack(alignment:.leading,spacing:13) {
+                HStack(spacing:8) {Image(systemName:"sparkles").foregroundStyle(Color.sage);Text("今天，去一个新世界").font(.system(size:16,weight:.semibold)).foregroundStyle(Color.quiet)}
+                Text(books[0].title).font(.system(size:29,weight:.bold,design:.rounded))
+                Text(books[0].opening).font(.system(size:18)).lineSpacing(5).fixedSize(horizontal:false,vertical:true)
+                HStack(spacing:12) {
+                    Button {model.openStory(books[0])} label:{Label("一起编这个故事",systemImage:"book.fill").font(.system(size:16,weight:.bold)).padding(.horizontal,16).padding(.vertical,11).foregroundStyle(.white).background(Color.sage,in:Capsule())}.buttonStyle(StoryButtonStyle())
+                    Button {model.browsing=false} label:{Image(systemName:"bubble.left.and.bubble.right").font(.system(size:20)).frame(width:40,height:40).background(Color.lilac.opacity(0.6),in:Circle())}.buttonStyle(.plain).help("和莉莉聊聊")
+                }.padding(.top,2)
+            }.padding(24).frame(maxWidth:.infinity,alignment:.leading)
+            WorldIllustration(id:books[0].theme.sceneID).frame(width:240).overlay(alignment:.leading) {LinearGradient(colors:[Color.white,.clear],startPoint:.leading,endPoint:.trailing).frame(width:32)}
+        }.frame(minHeight:230).background(.white).clipShape(RoundedRectangle(cornerRadius:23)).overlay(RoundedRectangle(cornerRadius:23).stroke(Color.lilacEdge.opacity(0.3))).shadow(color:Color.sage.opacity(0.08),radius:12,x:0,y:5)
+    }
+}
+struct ExplorationSheet:View {
+    var title:String
+    var icon:String
+    var text:String
+    var primary:String
+    var action:()->Void
+    @Environment(\.dismiss) private var dismiss
+    var body:some View {
+        VStack(alignment:.leading,spacing:24) {
+            HStack {Image(systemName:icon).font(.system(size:38)).foregroundStyle(Color.sage);Spacer();Button("返回"){dismiss()}.buttonStyle(.plain)}
+            Text(title).font(.system(size:27,weight:.bold,design:.rounded))
+            Text(text).font(.system(size:21)).lineSpacing(7)
+            Button(primary,action:action).buttonStyle(.borderedProminent).tint(Color.sage).controlSize(.large)
+        }.padding(30).frame(width:510).background(Color.paper)
+    }
+}
+struct StoryChooserView:View {
+    @ObservedObject var model:AppModel
+    @State private var theme=StoryTheme.forest
+    private var books:[StoryStarter] {ContentLibrary.books.filter{$0.theme==theme}}
+    var body:some View {
+        VStack(alignment:.leading,spacing:22) {
+            HStack {SectionTitle(title:model.selectedStarter == nil ? "挑一个开头，也可以自己想" : "你的故事，听你的",icon:"book.pages.fill");Spacer();Button("返回"){model.cancelStory()}.buttonStyle(.plain).font(.system(size:16,weight:.medium))}
+            if let book=model.selectedStarter {
+                HStack(alignment:.top,spacing:22) {
+                    WorldIllustration(id:book.theme.sceneID).frame(width:210,height:210).clipShape(RoundedRectangle(cornerRadius:18))
+                    VStack(alignment:.leading,spacing:14) {
+                        Text(book.title).font(.system(size:25,weight:.bold,design:.rounded))
+                        Text(book.opening).font(.system(size:19)).lineSpacing(6)
+                        Text("想先试试哪个办法？").font(.system(size:17,weight:.semibold)).padding(.top,3)
+                        ForEach(book.choices,id:\.self) {choice in
+                            Button {model.chooseDirection(choice)} label:{HStack(spacing:10) {Image(systemName:model.storyDirection == choice ? "checkmark.circle.fill" : "circle");Text(choice);Spacer(minLength:0)}.font(.system(size:17,weight:.medium)).foregroundStyle(model.storyDirection == choice ? Color.sage : Color.ink).padding(.vertical,4)}.buttonStyle(.plain)
+                        }
+                    }.frame(maxWidth:.infinity,alignment:.leading)
+                }.padding(22).background(.white,in:RoundedRectangle(cornerRadius:22)).overlay(RoundedRectangle(cornerRadius:22).stroke(Color.lilacEdge.opacity(0.4)))
+            }
+            VStack(alignment:.leading,spacing:12) {
+                Text(model.selectedStarter == nil ? "我想编……" : "也可以写下你自己的主意").font(.system(size:19,weight:.bold,design:.rounded))
+                HStack(alignment:.bottom,spacing:12) {
+                    TextField("比如：会飞的小猫，找到一间树屋",text:$model.draft,axis:.vertical).textFieldStyle(.plain).font(.system(size:18)).lineLimit(2...3).padding(15).background(.white,in:RoundedRectangle(cornerRadius:15))
+                    Button {model.send()} label:{Label("开始编故事",systemImage:"sparkles").font(.system(size:17,weight:.bold)).padding(.horizontal,18).padding(.vertical,15).foregroundStyle(.white).background(Color.sage,in:Capsule())}.buttonStyle(StoryButtonStyle()).disabled(model.draft.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || model.busy).opacity(model.draft.isEmpty ? 0.5 : 1)
+                }
+            }.padding(18).background(Color.lilac.opacity(0.45),in:RoundedRectangle(cornerRadius:20))
+            SectionTitle(title:"还有这些故事灵感",icon:"books.vertical.fill")
+            ThemeSelector(selected:$theme)
+            LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:14),count:3),spacing:14) {
+                ForEach(books) {book in StoryCoverCard(book:book,selected:model.selectedStarter?.id==book.id){model.chooseStory(book)}}
+            }
+        }.onAppear {if let selected=model.selectedStarter {theme=selected.theme}}
+    }
+}

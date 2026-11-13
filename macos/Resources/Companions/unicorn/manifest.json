@@ -1,0 +1,17 @@
+{
+  "format": "poses-3x2",
+  "width": 1536,
+  "height": 1024,
+  "cell": 512,
+  "poses": [
+    "idle",
+    "blink",
+    "listening",
+    "thinking",
+    "speaking",
+    "waving"
+  ],
+  "source": "Built-in image_gen, grounded in the existing TinyTales unicorn logo",
+  "sha256": "d192e1fb35c28f55842887191992c4fedc98d14d9d094ad39b359932a9d4451f",
+  "prompt": "imagegen-prompt.txt"
+}

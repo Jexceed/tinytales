@@ -1,0 +1,336 @@
+import Foundation
+import SwiftUI
+import AppKit
+import Combine
+
+@MainActor final class AppModel: ObservableObject {
+    @Published private(set) var selectedConversationID=UUID().uuidString
+    @Published private(set) var conversationTitle="莉莉"
+    // A new composer is not a sidebar record until a user message is sent.
+    @Published private(set) var isConversationStarted=false
+    @Published private var conversationCache:[String:ConversationSnapshot]=[:]
+    private var runtimeConversationIDs:[String]=[]
+    // Sidebar position and view identity do not change when a bookmark is opened.
+    private var sidebarOrder:[String]=[]
+    private var sidebarNavigationID=""
+    private var associatedStoryIDs:Set<String>=[]
+    private var linkedStoryID:String?
+    private var conversationRevision=0
+    private var pendingNewDraft=""
+    @Published var messages: [ChatMessage] = []
+    @Published var stories: [Story] = []
+    @Published var memories: [Memory] = []
+    @Published var settings = PartnerSettings()
+    @Published var draft = ""
+    @Published var choosingStory = false
+    @Published var browsing = false
+    @Published private(set) var entryOrigin = ConversationEntry.text
+    @Published private(set) var openingConsumed = false
+    @Published var selectedStarter:StoryStarter?
+    @Published var storyDirection = ""
+    @Published var busy = false
+    @Published var activity = ""
+    @Published var error = ""
+    @Published var showParent = false
+    @Published var requestParent = false
+    @Published var cloudAvailable = false
+    @Published var operations = 0
+    @Published private(set) var phone: RealtimeCall?
+    let voice = NativeVoice()
+    private var teacherSpeech:TeacherSpeechClient?
+    let store: LocalStore
+    let storySession = StorySession()
+    private let keyProvider: () -> String?
+    private let modelFactory: (String) -> PartnerModel
+    private let callFactory: ((LocalStore,String,String,StorySession)->RealtimeCall)?
+    private var authorizedKey: String?
+    private var connectionKey: String? { authorizedKey }
+    private var engine: CompanionEngine?
+    private var work: Task<Void, Never>?
+    private var callWork: Task<Void, Never>?
+    private var phoneObserver: AnyCancellable?
+    private var generation = UUID()
+    private var streamingID: UUID?
+    private var priorStoryDraft = ""
+    private var priorBrowsing = true
+    var showsOpeningOptions:Bool {
+        !openingConsumed && entryOrigin == .text && !inCall && !busy && !messages.contains { $0.source != "welcome" }
+    }
+    func chooseOpening(_ choice:OpeningPrompt) {
+        guard showsOpeningOptions else{return}
+        preparePrompt(choice.text)
+    }
+    func enterVoiceConversation() {
+        if choosingStory {cancelStory()}
+        browsing=false;entryOrigin = .voice;openingConsumed=true
+        selectedStarter=nil;storyDirection=""
+    }
+    private func enterTextConversation() {browsing=false;entryOrigin = .text;openingConsumed=true}
+    var pendingCount: Int { memories.filter { $0.status == "pending" }.count }
+    var inCall: Bool { phone?.active == true }
+    var callCaption: String {
+        guard let phone, phone.active else { return "打个电话，直接聊聊" }
+        if phone.muted { return "麦克风已静音" }
+        switch phone.state { case .connecting: return "正在接通…"; case .listening: return "已接通，想说什么就说吧"; case .thinking: return "莉莉正在想一想…"; case .speaking: return "莉莉正在说，你也可以接话"; case .ended: return "通话已结束" }
+    }
+    init(store: LocalStore, keyProvider: @escaping () -> String? = Credentials.load, modelFactory: @escaping (String) -> PartnerModel = { OpenAIClient(key: $0) }, callFactory: ((LocalStore,String,String,StorySession)->RealtimeCall)? = nil) {
+        self.store = store; self.keyProvider = keyProvider; self.modelFactory = modelFactory; self.callFactory=callFactory
+        authorizedKey = keyProvider()
+        cloudAvailable = connectionKey != nil
+        refresh(); newConversation()
+    }
+    func refresh() {
+        do { stories = try store.stories().filter { $0.source == "cloud" }; memories = try store.memories(); settings = try store.settings(); operations = try store.usage().operations; rememberSidebarPositions() }
+        catch { self.error = error.localizedDescription }
+    }
+    private var history: [[String: Any]] {
+        Array(messages.filter { $0.source != "welcome" && !$0.text.isEmpty && $0.text != "…" && !$0.isStreaming }.suffix(12)).map { ["role": $0.isUser ? "user" : "assistant", "content": $0.text] }
+    }
+    private func rememberSidebarPositions() {
+        let archiveIDs=stories.map{"archive:"+$0.id}
+        var valid=Set(archiveIDs)
+        if isConversationStarted {valid.insert(sidebarNavigationID)}
+        for saved in conversationCache.values where saved.hasStarted {valid.insert(saved.navigationID ?? saved.id)}
+        sidebarOrder.removeAll{!valid.contains($0)}
+        for id in archiveIDs where !sidebarOrder.contains(id) {sidebarOrder.append(id)}
+    }
+    var conversations:[ConversationItem] {
+        var items=runtimeConversationIDs.compactMap {id -> ConversationItem? in
+            if id == selectedConversationID {return isConversationStarted ? ConversationItem(id:id,title:conversationTitle,storyID:linkedStoryID,rowID:sidebarNavigationID) : nil}
+            guard let saved=conversationCache[id],saved.hasStarted else{return nil}
+            return ConversationItem(id:id,title:saved.title,storyID:saved.linkedStoryID,rowID:saved.navigationID)
+        }
+        if isConversationStarted && !items.contains(where:{$0.id == selectedConversationID}) {items.append(ConversationItem(id:selectedConversationID,title:conversationTitle,storyID:linkedStoryID,rowID:sidebarNavigationID))}
+        var represented=Set(items.compactMap(\.storyID))
+        if isConversationStarted {represented.formUnion(associatedStoryIDs)}
+        for saved in conversationCache.values where saved.hasStarted {represented.formUnion(saved.associatedStoryIDs)}
+        items += stories.filter{!represented.contains($0.id)}.map{ConversationItem(id:"archive:"+$0.id,title:$0.title,storyID:$0.id)}
+        let ranks=Dictionary(sidebarOrder.enumerated().map{($0.element,$0.offset)},uniquingKeysWith:min)
+        return items.sorted {
+            let left=ranks[$0.navigationID] ?? Int.max,right=ranks[$1.navigationID] ?? Int.max
+            return left == right ? $0.navigationID < $1.navigationID : left < right
+        }
+    }
+    private func cacheCurrentConversation() {
+        guard isConversationStarted else {
+            pendingNewDraft=Safety.shouldProtectUserInput(draft) ? "" : draft
+            conversationCache.removeValue(forKey:selectedConversationID);runtimeConversationIDs.removeAll{$0 == selectedConversationID};return
+        }
+        let retained=messages.filter{!$0.isStreaming && (!$0.isUser || !Safety.shouldProtectUserInput($0.text))}
+        conversationCache[selectedConversationID]=ConversationSnapshot(id:selectedConversationID,title:conversationTitle,messages:retained,draft:Safety.shouldProtectUserInput(draft) ? "" : draft,entry:entryOrigin,openingConsumed:openingConsumed,story:storySession.current,pictureID:storySession.currentPictureID,linkedStoryID:linkedStoryID,hasStarted:true,navigationID:sidebarNavigationID,associatedStoryIDs:associatedStoryIDs)
+    }
+    private func configureEngine() {
+        if let key=connectionKey {
+            engine=CompanionEngine(store:store,model:modelFactory(key),session:storySession)
+            engine?.onActivity = {[weak self] text in self?.activity=text}
+            engine?.onDraft = {[weak self] text in self?.updateDraftReply(text)}
+        } else {engine=nil}
+    }
+    private func nameConversation(from text:String) {
+        let clean=text.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard ["莉莉","新对话","语音对话"].contains(conversationTitle), !clean.isEmpty, !Safety.isPrivate(clean) else{return}
+        conversationTitle=OpeningPrompt.allCases.first{$0.text == clean}?.title ?? String(clean.components(separatedBy:.newlines).first!.prefix(20))
+    }
+    func recordUserMessageSent(_ text:String,isVoice:Bool=false) {
+        if !isConversationStarted {
+            isConversationStarted=true;pendingNewDraft=""
+            conversationTitle=isVoice ? "语音对话" : "新对话"
+            if !runtimeConversationIDs.contains(selectedConversationID) {runtimeConversationIDs.insert(selectedConversationID,at:0)}
+            if !sidebarOrder.contains(sidebarNavigationID) {sidebarOrder.insert(sidebarNavigationID,at:0)}
+        }
+        nameConversation(from:text)
+    }
+    private func syncConversationStory() {
+        guard isConversationStarted else{return}
+        if let story=storySession.current {linkedStoryID=story.id;associatedStoryIDs.insert(story.id);conversationTitle=story.title}
+    }
+    func selectConversation(_ id:String) {
+        guard !inCall else{return}
+        if conversationRevision != store.revision {newConversation(forgettingHistory:true);refresh()}
+        guard id != selectedConversationID else{return}
+        if id.hasPrefix("archive:"),let existing=conversations.first(where:{$0.id != id && ($0.storyID == String(id.dropFirst(8)) || $0.navigationID == id)}) {selectConversation(existing.id);return}
+        let target:ConversationSnapshot
+        if let cached=conversationCache[id] {target=cached}
+        else if let story=stories.first(where:{"archive:"+$0.id == id}) {
+            target=ConversationSnapshot(id:UUID().uuidString,title:story.title,messages:[ChatMessage(isUser:false,text:story.resumeText,source:"archive")],draft:"",entry:.text,openingConsumed:true,story:story,pictureID:nil,linkedStoryID:story.id,hasStarted:true,navigationID:id,associatedStoryIDs:[story.id])
+        } else {return}
+        cancel();cacheCurrentConversation()
+        selectedConversationID=target.id;conversationTitle=target.title;linkedStoryID=target.linkedStoryID;isConversationStarted=target.hasStarted
+        sidebarNavigationID=target.navigationID ?? target.id;associatedStoryIDs=target.associatedStoryIDs
+        if !runtimeConversationIDs.contains(target.id) {runtimeConversationIDs.append(target.id)}
+        messages=target.messages;draft=target.draft;entryOrigin=target.entry;openingConsumed=target.openingConsumed
+        browsing=false;choosingStory=false;selectedStarter=nil;storyDirection="";error=""
+        configureVoice();configureEngine()
+        // Engine initialization resets its local context; restore the selected
+        // bookmark afterwards so continuation and drawing use the same story.
+        storySession.current=target.story;storySession.currentPictureID=target.pictureID
+        engine?.seedHistory(history);rememberSidebarPositions()
+    }
+    func newConversation(forgettingHistory:Bool=false) {
+        cancel()
+        if forgettingHistory || conversationRevision != store.revision {conversationCache.removeAll();runtimeConversationIDs.removeAll();pendingNewDraft=""}
+        else {cacheCurrentConversation()}
+        conversationRevision=store.revision
+        selectedConversationID=UUID().uuidString;sidebarNavigationID=selectedConversationID;associatedStoryIDs=[];conversationTitle="莉莉";linkedStoryID=nil;isConversationStarted=false
+        storySession.reset();choosingStory=false;browsing=false;entryOrigin = .text;openingConsumed = !pendingNewDraft.isEmpty;selectedStarter=nil;storyDirection="";generation=UUID();error="";draft=pendingNewDraft
+        messages=[ChatMessage(isUser:false,text:"你好，我是莉莉。想聊些什么？",source:"welcome")]
+        configureVoice();cloudAvailable=connectionKey != nil;configureEngine();rememberSidebarPositions()
+    }
+    private func configureVoice() {
+        if VoiceStyle.speaker(settings.voiceStyle) != nil,teacherSpeech==nil {teacherSpeech=TeacherSpeechClient.discover()}
+        voice.teacherSpeech=teacherSpeech
+        if let key = connectionKey {
+            let client = OpenAIClient(key: key), style = VoiceStyle.cloudVoice(settings.voiceStyle)
+            voice.cloudSpeech = { [weak self] text in
+                guard let self else { throw CancellationError() }
+                try self.store.recordCloudOperation()
+                let narrator = RealtimeNarrator(wire:OpenAIRealtimeWire(key:key))
+                let bytes: Data
+                do { bytes = try await narrator.speak(text,voice:style) }
+                catch is CancellationError { throw CancellationError() }
+                catch { try Task.checkCancellation(); try self.store.recordCloudOperation(); bytes = try await client.speech(text,voice:style) }
+                self.refresh(); return bytes
+            }
+        } else { voice.cloudSpeech = nil }
+        voice.configure(backend: settings.voiceBackend, warm: false,style:settings.voiceStyle)
+    }
+    private func updateDraftReply(_ text: String) {
+        if text.isEmpty {
+            if let streamingID { messages.removeAll { $0.id == streamingID } }
+            streamingID = nil; return
+        }
+        if let streamingID, let index = messages.firstIndex(where: { $0.id == streamingID }) { messages[index].text = text }
+        else {
+            var message = ChatMessage(isUser: false, text: text); message.isStreaming = true
+            streamingID = message.id; messages.append(message)
+        }
+    }
+    func beginStory() {
+        if !choosingStory { priorStoryDraft = draft; priorBrowsing = browsing; draft = ""; selectedStarter = nil; storyDirection = "" }
+        voice.stopSpeaking(); choosingStory = true; browsing = false; openingConsumed=true
+    }
+    func chooseStory(_ choice: StoryStarter) { selectedStarter = choice; storyDirection = ""; draft = choice.title }
+    func openStory(_ choice:StoryStarter) { beginStory(); chooseStory(choice) }
+    func chooseDirection(_ direction:String) { guard let selectedStarter else{return};storyDirection=direction;draft=selectedStarter.title + " · " + direction }
+    func preparePrompt(_ text:String) { voice.stopSpeaking(); enterTextConversation(); draft=text }
+    func cancelStory() { choosingStory = false; draft = priorStoryDraft; browsing = priorBrowsing; selectedStarter = nil; storyDirection = "" }
+
+    func cancel() {
+        work?.cancel(); work = nil; engine?.interrupt(); voice.cancelRecording(); voice.stopSpeaking()
+        callWork?.cancel(); callWork = nil; phone?.hangUp()
+        updateDraftReply(""); busy = false; activity = ""; generation = UUID()
+    }
+    func send(_ given: String? = nil) {
+        let text = (given ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !busy, !text.isEmpty else { return }
+        guard text.count <= 600 else { error = "这一段有点长，请分成几句慢慢说。"; return }
+        let startingStory = choosingStory
+        let request:String
+        if startingStory, let selectedStarter, text == selectedStarter.title || text == selectedStarter.title + " · " + storyDirection {
+            request = selectedStarter.prompt + (storyDirection.isEmpty ? "" : "小朋友选择的方向是：" + storyDirection + "。请沿着这个选择展开。")
+        } else { request = text }
+        if startingStory && !inCall { newConversation() }
+        if startingStory && inCall { self.engine?.reset() }
+        enterTextConversation()
+        guard cloudAvailable, let engine else { error = "先连接故事伙伴，连接完成后就能直接聊。"; showParent = true; return }
+        recordUserMessageSent(text)
+        if inCall, let phone {
+            choosingStory = false; draft = ""; error = ""; messages.append(ChatMessage(isUser: true, text: text))
+            Task { do { try await phone.sendText(request, newStory: startingStory) } catch { self.error = error.localizedDescription } }
+            return
+        }
+        voice.stopSpeaking(); error = ""; draft = ""; busy = true; activity = "莉莉在认真听"
+        choosingStory = false
+        let message = ChatMessage(isUser: true, text: text), captured = generation
+        messages.append(message)
+        work = Task {
+            do {
+                let result = try await engine.turn(request, newStory: startingStory)
+                try Task.checkCancellation(); guard captured == generation else { return }
+                if let streamingID, let index = messages.firstIndex(where: { $0.id == streamingID }) {
+                    messages[index].text = result.reply.reply; messages[index].activities = result.activities
+                    messages[index].sceneID = result.sceneID; messages[index].word = result.word; messages[index].artwork = result.artwork
+                    messages[index].suggestions = result.reply.suggestions; messages[index].source = result.source; messages[index].isStreaming = false
+                } else { messages.append(ChatMessage(isUser: false, text: result.reply.reply, activities: result.activities, sceneID: result.sceneID, word: result.word, source: result.source, artwork: result.artwork, suggestions: result.reply.suggestions)) }
+                streamingID = nil
+                syncConversationStory();refresh(); busy = false; activity = ""
+                if settings.speaks { voice.speak(result.reply.reply) }
+            } catch {
+                guard captured == generation else { return }
+                updateDraftReply(""); busy = false; activity = ""
+                if !(error is CancellationError) { self.error = error.localizedDescription; draft = text }
+            }
+        }
+    }
+    func toggleCall() {
+        if inCall { callWork?.cancel(); phone?.hangUp(); return }
+        enterVoiceConversation()
+        guard let key = connectionKey else { error = "先连接故事伙伴，之后点一次电话就能持续交流。"; showParent = true; return }
+        work?.cancel(); work = nil; engine?.interrupt(); updateDraftReply(""); busy = false; voice.shutdown(); error = ""
+        let intentClient=OpenAIClient(key:key)
+        intentClient.onVoiceIntentRequest={ [store] in try await MainActor.run{try store.recordCloudOperation()} }
+        let call = callFactory?(store,key,settings.voiceStyle,storySession) ?? RealtimeCall(store: store, wire: OpenAIRealtimeWire(key: key,model:"gpt-realtime-2.1"), audio: NativeCallAudio(), voice: settings.voiceStyle, session: storySession, illustrator: { [store] story in
+            let client = OpenAIClient(key:key)
+            client.onArtworkRequest = { try await MainActor.run { try store.recordCloudOperation() } }
+            return try await client.illustrate(story)
+        },teacherSpeech:teacherSpeech,intentJudge:intentClient)
+        phone = call
+        phoneObserver = call.objectWillChange.sink { [weak self] _ in Task { @MainActor in self?.objectWillChange.send() } }
+        call.onUserText = { [weak self] item, text in
+            guard let self else { return }
+            guard !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else{return}
+            self.recordUserMessageSent(text,isVoice:true)
+            if let index = self.messages.firstIndex(where: { $0.externalID == item }) { self.messages[index].text = text }
+            else { self.messages.append(ChatMessage(isUser: true, text: text, externalID: item)) }
+        }
+        call.onAssistantDraft = { [weak self] item, text in
+            guard let self else { return }
+            if let index = self.messages.firstIndex(where: { $0.externalID == item }) { self.messages[index].text = text }
+            else { var message = ChatMessage(isUser: false, text: text, externalID: item); message.isStreaming = true; self.messages.append(message) }
+        }
+        call.onAssistantInterrupted = { [weak self] item in
+            guard let self, let index = self.messages.firstIndex(where: { $0.externalID == item }) else { return }; self.messages[index].isStreaming = false
+        }
+        call.onAssistantText = { [weak self] item, text, scene, word, actions in
+            guard let self else { return }
+            if let index = self.messages.firstIndex(where: { $0.externalID == item }) {
+                self.messages[index].text = text; self.messages[index].activities = actions
+                self.messages[index].sceneID = scene; self.messages[index].word = word; self.messages[index].isStreaming = false
+            } else { self.messages.append(ChatMessage(isUser: false, text: text, activities: actions, sceneID: scene, word: word, externalID: item)) }
+            self.syncConversationStory();self.refresh()
+        }
+        call.onArtwork = { [weak self] item, artwork in
+            guard let self, let index = self.messages.firstIndex(where: { $0.externalID == item }) else { return }
+            self.messages[index].artwork = artwork
+        }
+        call.onEnd = { [weak self, weak call] in
+            guard let self else { return }
+            for index in self.messages.indices { self.messages[index].isStreaming = false }
+            self.engine?.seedHistory(self.history);self.syncConversationStory();self.refresh()
+            if let notice = call?.notice, !notice.isEmpty { self.error = notice }
+        }
+        let prior = history
+        callWork = Task { do { try await call.connect(history: prior) } catch { if !(error is CancellationError) { self.error = error.localizedDescription }; call.hangUp() } }
+    }
+    func updateSettings(_ value: PartnerSettings) {
+        do {
+            let reset = settings.memoryEnabled != value.memoryEnabled || settings.english != value.english || settings.sessionMinutes != value.sessionMinutes
+            let voiceChanged = settings.voiceBackend != value.voiceBackend || settings.speaks != value.speaks || settings.voiceStyle != value.voiceStyle
+            try store.setSettings(value); settings = value
+            if reset { newConversation(forgettingHistory:true) }
+            else if voiceChanged { voice.stopSpeaking(); configureVoice() }
+            refresh()
+        } catch { self.error = error.localizedDescription }
+    }
+    func updateMemory(_ memory: Memory) { do { try store.editMemory(memory); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
+    func removeMemory(_ memory: Memory) { do { try store.delete("memories", id: memory.id); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
+    func deleteStory(_ story: Story) { do { try store.delete("stories", id: story.id); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
+    func clearData() { do { try store.clear(); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
+    func saveKey(_ key: String) throws { try Credentials.save(key); authorizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines); cloudAvailable = true; newConversation(forgettingHistory:true) }
+    func reconnectSavedKey() { if let key = Credentials.authorizeSavedKey() { authorizedKey = key; newConversation(forgettingHistory:true); showParent = false } else { error = "还没有找到可用的连接配置，请填写后保存。" } }
+    func forgetKey() throws { try Credentials.delete(); authorizedKey = keyProvider(); cloudAvailable = connectionKey != nil; newConversation(forgettingHistory:true) }
+    func exportData() {
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "小小故事屋-本机数据.json"
+        if panel.runModal() == .OK, let url = panel.url { do { try store.export().write(to: url, options: .atomic) } catch { self.error = error.localizedDescription } }
+    }
+}
