@@ -13,6 +13,32 @@ let trainArtworkPlan: [String: Any] = ["ready":true,"sameStory":false,"title":"�
 
 @MainActor func artworkTestCases() -> [(String, @MainActor () async throws -> Void)] {
     [
+        ("AI-008 first drawing still works after welcome idle time and invalid empty input", {
+            let store=try fixture();defer{remove(store)}
+            var clock=Date(timeIntervalSince1970:1000)
+            let fake=FakeIllustrator([]),engine=CompanionEngine(store:store,model:fake,now:{clock})
+            clock=clock.addingTimeInterval(7200)
+            do {_ = try await engine.turn("   ");throw PartnerError.message("TEST: empty input accepted")}
+            catch {try expect(!error.localizedDescription.contains("TEST:"),"empty input accepted")}
+            clock=clock.addingTimeInterval(7200)
+            let result=try await engine.turn("画一辆红色小火车")
+            guard let art=result.artwork else{throw PartnerError.message("TEST: idle welcome blocked drawing")};defer{ArtworkArchive.remove(art)}
+            try expect(fake.illustrationRequests.count == 1,"first drawing never started")
+        }),
+        ("AI-008 an active session retains its deadline and reset starts a new idle session", {
+            let store=try fixture();defer{remove(store)}
+            var settings=try store.settings();settings.sessionMinutes=5;try store.setSettings(settings)
+            var clock=Date(timeIntervalSince1970:1000)
+            let fake=FakeModel([finish("你好。"),finish("又见面啦。")]),engine=CompanionEngine(store:store,model:fake,now:{clock})
+            _ = try await engine.turn("你好")
+            clock=clock.addingTimeInterval(301)
+            do {_ = try await engine.turn("再聊聊");throw PartnerError.message("TEST: active deadline lost")}
+            catch {try expect(!error.localizedDescription.contains("TEST:"),"expired session was silently extended")}
+            try expect(fake.inputs.count == 1,"expired request reached the model")
+            engine.reset();clock=clock.addingTimeInterval(7200)
+            _ = try await engine.turn("你好")
+            try expect(fake.inputs.count == 2,"reset session expired before first input")
+        }),
         ("AI-001 colloquial drawing requests are recognized without confusing fictional actions", {
             for text in ["我说你画图吧，还是我要看一张图。","你画图吧","不要画小兔，画一辆红色小火车","画个小火车","生成一张图","我想看一张小火车的图片","把刚才的小火车画出来","我要看一张图"] {
                 try expect(StoryIntent.illustration(text),"missed request: " + text)

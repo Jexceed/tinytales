@@ -21,7 +21,8 @@ enum LilyPersona {
     private let image: (String) throws -> Data?
     private var history: [[String: Any]] = []
     private var epoch = UUID()
-    private var expires = Date()
+    private let now: () -> Date
+    private var expires: Date?
     private var turnCount = 0
     private var busy = false
     private var activeStory: String?
@@ -31,17 +32,17 @@ enum LilyPersona {
     var onContentReview: (([String])->Void)?
     var onReview: ((String) -> Void)?
     private let reviewLog = Logger(subsystem: "com.jexceed.tinytales", category: "conversation-review")
-    init(store: LocalStore, model: PartnerModel, session: StorySession? = nil, image: @escaping (String) throws -> Data? = { id in
+    init(store: LocalStore, model: PartnerModel, session: StorySession? = nil, now: @escaping () -> Date = Date.init, image: @escaping (String) throws -> Data? = { id in
         guard let scene = Scene.all.first(where: { $0.id == id }), let url = scene.visionURL else { return nil }
         return try Data(contentsOf: url)
-    }) { self.store = store; self.model = model; self.image = image; self.session = session ?? StorySession(); reset()
+    }) { self.store = store; self.model = model; self.image = image; self.now = now; self.session = session ?? StorySession(); reset()
         if let client = model as? OpenAIClient { client.onArtworkRequest = { [store] in try await MainActor.run { try store.recordCloudOperation() } } } }
-    func reset() { epoch = UUID(); history = []; turnCount = 0; activeStory = nil; session.reset(); expires = Date().addingTimeInterval(Double((try? store.settings().sessionMinutes) ?? 10) * 60) }
+    func reset() { epoch = UUID(); history = []; turnCount = 0; activeStory = nil; session.reset(); expires = nil }
     func interrupt() { epoch = UUID() }
     func seedHistory(_ messages: [[String: Any]]) { history = Array(messages.suffix(12)); activeStory = session.current?.id }
     private func valid(_ captured: UUID, _ revision: Int) throws {
         try Task.checkCancellation()
-        guard epoch == captured, revision == store.revision, Date() < expires else { throw PartnerError.message("这一段对话已经结束。准备好了，再开一段吧。") }
+        guard epoch == captured, revision == store.revision, let expires, now() < expires else { throw PartnerError.message("这一段对话已经结束。准备好了，再开一段吧。") }
     }
     private func note(_ event: String) {
         onReview?(event)
@@ -57,10 +58,11 @@ enum LilyPersona {
     }
     func turn(_ text: String, newStory: Bool = false) async throws -> PartnerResult {
         guard !busy else { throw PartnerError.message("我还在想上一句话，等我一下。") }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 600, turnCount < 20, Date() < expires else { throw PartnerError.message("让想象休息一会儿，再开启新的对话吧。") }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 600, turnCount < 20, expires.map({ now() < $0 }) ?? true else { throw PartnerError.message("让想象休息一会儿，再开启新的对话吧。") }
         busy = true; defer { busy = false }
         let captured = epoch, revision = store.revision
         if Safety.shouldProtectUserInput(text) { note("input_privacy"); return safe(Safety.privateReply) }
+        if expires == nil { expires = now().addingTimeInterval(Double((try? store.settings().sessionMinutes) ?? 10) * 60) }
         onActivity?("莉莉在认真听")
         let inputAllowed = try await model.moderate(text)
         try valid(captured, revision)
