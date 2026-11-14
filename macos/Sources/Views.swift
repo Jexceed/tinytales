@@ -77,6 +77,7 @@ struct StoryBooks: View {
 struct MainView:View {
     @ObservedObject var model:AppModel
     @Environment(\.openWindow) private var openWindow
+    @State private var deletionCandidate:ConversationItem?
     private var conversation:[ChatMessage] {model.messages.filter{$0.source != "welcome"}}
     var body:some View {
         HStack(spacing:0) {
@@ -85,6 +86,12 @@ struct MainView:View {
             conversationPane
         }.foregroundStyle(Color.ink).background(Color.paper).frame(minWidth:1000,minHeight:600)
             .sheet(isPresented:$model.showParent) {ParentView(model:model)}
+            .alert("删除这段对话？",isPresented:Binding(get:{deletionCandidate != nil},set:{if !$0 {deletionCandidate=nil}}),presenting:deletionCandidate) {item in
+                Button("取消",role:.cancel) {deletionCandidate=nil}
+                Button("删除",role:.destructive) {model.deleteConversation(item.id);deletionCandidate=nil}
+            } message: {item in
+                Text("“\(item.title)”及其中的故事和配图将被删除，无法恢复。" + (model.selectedConversationID == item.id && (model.busy || model.inCall) ? "正在进行的通话或生成也会停止。" : ""))
+            }
             .onChange(of:model.requestParent) {_,requested in if requested {model.requestParent=false;model.showParent=true}}
             .onAppear {DesktopPetController.shared.registerOpener {openWindow(id:"main")}}
     }
@@ -134,20 +141,27 @@ struct MainView:View {
                     VStack(spacing:4) {
                         ForEach(model.conversations,id:\.navigationID) {item in
                             let selected=model.selectedConversationID == item.id
-                            Button {model.selectConversation(item.id)} label:{
-                                HStack(alignment:.top,spacing:9) {
+                            HStack(spacing:0) {
+                                Button {model.selectConversation(item.id)} label:{
+                                  HStack(alignment:.top,spacing:9) {
                                     Image(systemName:item.storyID == nil ? (selected ? "bubble.left.fill" : "bubble.left") : (selected ? "book.closed.fill" : "book.closed"))
                                         .font(.system(size:14)).frame(width:17).padding(.top,2)
                                     Text(item.title).font(.system(size:15,weight:selected ? .semibold : .medium)).lineLimit(2).multilineTextAlignment(.leading)
                                     Spacer(minLength:0)
-                                }.foregroundStyle(selected ? Color.sage : Color.ink)
-                                    .padding(.horizontal,11).padding(.vertical,11).frame(maxWidth:.infinity,alignment:.leading)
-                                    .background(selected ? Color.sage.opacity(0.13) : .clear,in:RoundedRectangle(cornerRadius:10))
-                                    .overlay(RoundedRectangle(cornerRadius:10).strokeBorder(selected ? Color.sage.opacity(0.28) : .clear))
-                                    .overlay(alignment:.leading) {if selected {Capsule().fill(Color.sage).frame(width:3,height:24).padding(.leading,1)}}
+                                  }.padding(.leading,11).padding(.trailing,3).padding(.vertical,11).frame(maxWidth:.infinity,alignment:.leading)
                                     .contentShape(RoundedRectangle(cornerRadius:10))
-                            }.buttonStyle(StoryButtonStyle()).disabled(model.inCall && !selected).opacity(model.inCall && !selected ? 0.5 : 1)
+                                }.buttonStyle(StoryButtonStyle()).disabled(model.inCall && !selected).opacity(model.inCall && !selected ? 0.5 : 1)
                                 .accessibilityAddTraits(selected ? [.isSelected] : [])
+                                Menu {
+                                    Button(role:.destructive) {deletionCandidate=item} label:{Label("删除对话…",systemImage:"trash")}
+                                } label:{Image(systemName:"ellipsis").font(.system(size:14,weight:.semibold)).frame(width:25,height:30).contentShape(Rectangle())}
+                                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().padding(.trailing,3)
+                                    .accessibilityLabel("更多操作，"+item.title).help("更多操作")
+                            }.foregroundStyle(selected ? Color.sage : Color.ink)
+                                .background(selected ? Color.sage.opacity(0.13) : .clear,in:RoundedRectangle(cornerRadius:10))
+                                .overlay(RoundedRectangle(cornerRadius:10).strokeBorder(selected ? Color.sage.opacity(0.28) : .clear))
+                                .overlay(alignment:.leading) {if selected {Capsule().fill(Color.sage).frame(width:3,height:24).padding(.leading,1)}}
+                                .contextMenu {Button(role:.destructive) {deletionCandidate=item} label:{Label("删除对话…",systemImage:"trash")}}
                         }
                     }
                 }

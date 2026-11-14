@@ -22,6 +22,7 @@ for path in files:
 mapped = 0
 for feature, test_file, prefix, suite, registration in [
     ("001-natural-voice-turns", "NaturalTurnTests.swift", "VT", "PhoneTests.swift", "naturalTurnTestCases()"),
+    ("005-conversation-deletion", "ConversationDeletionTests.swift", "CD", "NativeTests.swift", "conversationDeletionTestCases()"),
     ("004-conversation-artwork", "ArtworkTests.swift", "AI", "NativeTests.swift", "artworkTestCases()"),
     ("002-lily-pet-behaviors", "PetBehaviorTests.swift", "PB", "NativeTests.swift", "petBehaviorTestCases()"),
 ]:

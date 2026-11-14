@@ -98,6 +98,9 @@ func wav(_ pcm: Data) -> Data {
 }
 @main struct PhoneTests {
     @MainActor static func main() async {
+        let artworkDirectory=FileManager.default.temporaryDirectory.appendingPathComponent("tinytales-phone-artwork-"+UUID().uuidString)
+        ArtworkArchive.directory=artworkDirectory
+        defer {try? FileManager.default.removeItem(at:artworkDirectory)}
         if CommandLine.arguments.contains("--artwork-live") {await artworkPhoneLive();return}
         if CommandLine.arguments.contains("--voice-intent-live") {await voiceIntentLive();return}
         if CommandLine.arguments.contains("--duplex-live") || CommandLine.arguments.contains("--turns-live") {await duplexLive();return}
@@ -196,6 +199,33 @@ func wav(_ pcm: Data) -> Data {
                 let cancelled=Task{try await cancelReader.speak("你好",voice:"shimmer")};await settle();cancelled.cancel();await settle()
                 do{_=try await cancelled.value;throw PartnerError.message("TEST: cancelled narration accepted")}catch{try require(error is CancellationError,"cancellation not surfaced")}
                 try require(other.closed,"cancelled socket left open")
+            }),
+            ("CD-005 deleting the current conversation ends its call and ignores late events", {
+                let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio()
+                let app=AppModel(store:store,keyProvider:{"fixture"},callFactory:{store,_,_,session in RealtimeCall(store:store,wire:wire,audio:audio,permission:{true},voice:"shimmer",session:session)})
+                app.recordUserMessageSent("删除验证的通话",isVoice:true);let target=app.selectedConversationID
+                app.toggleCall();await settle();wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+                try require(app.inCall,"test call not active")
+                let stopped=audio.stops
+                app.deleteConversation(target)
+                wire.emit(["type":"response.done","response":["id":"late-deleted","status":"completed","output":[["type":"message","id":"late-item","content":[["text":"迟到的回复"]]]]]]);await settle()
+                try require(!app.inCall && wire.closed && audio.stops>stopped,"deleted call kept recording")
+                try require(!app.isConversationStarted && app.conversations.isEmpty && !app.messages.contains{$0.text=="迟到的回复"},"deleted call restored a row")
+            }),
+            ("CD-003 deleting other history keeps the current call and its next reply working", {
+                let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio()
+                let old=Story(title:"另一个历史故事",summary:"小猫在花园。")
+                try store.saveStory(old)
+                let app=AppModel(store:store,keyProvider:{"fixture"},callFactory:{store,_,_,session in RealtimeCall(store:store,wire:wire,audio:audio,permission:{true},voice:"shimmer",session:session)})
+                app.recordUserMessageSent("现在的通话",isVoice:true);let selected=app.selectedConversationID
+                app.toggleCall();await settle();wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+                defer{app.phone?.hangUp()}
+                let stops=audio.stops;app.deleteConversation("archive:"+old.id)
+                try require(app.inCall && !wire.closed && audio.stops==stops && app.selectedConversationID==selected,"unrelated deletion stopped current call")
+                try await app.phone!.sendText("你好")
+                wire.emit(["type":"response.created","response":["id":"kept-r"]]);await settle()
+                wire.emit(["type":"response.done","response":["id":"kept-r","status":"completed","output":[["type":"message","id":"kept-a","content":[["text":"我还在这里。"]]]]]]);await settle()
+                try require(app.inCall && app.messages.last?.text=="我还在这里。" && app.error.isEmpty,"next reply failed after deleting other history")
             }),
             ("AI-002 phone drawing uses actual recent dialogue without a saved narrative", {
                 let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio(),session=StorySession()

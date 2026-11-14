@@ -5,6 +5,9 @@ final class LocalStore {
     private var database: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private(set) var revision = 0
+    // A targeted deletion must not invalidate unrelated active conversations.
+    // In-flight tools still cannot write a deleted story back in this process.
+    private var deletedStoryIDs: Set<String> = []
     let url: URL
     init(url: URL? = nil) throws {
         self.url = url ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.jexceed.tinytales/tinytales.sqlite")
@@ -54,6 +57,7 @@ final class LocalStore {
     }
     func editMemory(_ memory: Memory) throws { try remember(memory); revision += 1 }
     func saveStory(_ story: Story) throws {
+        guard !deletedStoryIDs.contains(story.id) else { throw PartnerError.message("这个故事已删除，请开始新的对话。") }
         guard !story.title.isEmpty, story.title.count <= 35, !story.summary.isEmpty, story.summary.count <= 5000, !Safety.isPrivate(story.title + story.summary), !Safety.isRisk(story.title + story.summary) else { throw PartnerError.message("故事摘要中有不适合保存的内容。") }
         try write("stories", id: story.id, value: story)
         for s in try stories().dropFirst(20) { try delete("stories", id: s.id, invalidate: false) }
@@ -65,6 +69,20 @@ final class LocalStore {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw PartnerError.message("删除没有完成，请再试一次。") }
         if table == "stories" { ArtworkArchive.clear(storyID:id) }
         if invalidate { revision += 1 }
+    }
+    func deleteConversationStories(_ ids: Set<String>, preservingArtworkIDs: Set<String> = []) throws {
+        guard !ids.isEmpty else { return }
+        try transaction {
+            for id in ids.sorted() {
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(database,"DELETE FROM stories WHERE id=?",-1,&statement,nil) == SQLITE_OK else { throw PartnerError.message("删除没有完成，请再试一次。") }
+                defer { sqlite3_finalize(statement) }
+                sqlite3_bind_text(statement,1,id,-1,transient)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw PartnerError.message("删除没有完成，请再试一次。") }
+            }
+        }
+        deletedStoryIDs.formUnion(ids)
+        for id in ids { ArtworkArchive.clear(storyID:id,keepingIDs:preservingArtworkIDs) }
     }
     func clear() throws { try execute("DELETE FROM memories; DELETE FROM stories; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"); ArtworkArchive.clear(); revision += 1 }
     func transaction(_ block: () throws -> Void) throws {

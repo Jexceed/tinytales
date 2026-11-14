@@ -39,7 +39,9 @@ extension StoryArtwork {
     }
 }
 enum ArtworkArchive {
-    static var directory: URL { AppResources.supportDirectory.appendingPathComponent("artwork",isDirectory:true) }
+    // Production keeps its managed directory. Test executables and isolated
+    // launch fixtures replace this before constructing any model or store.
+    static var directory: URL = AppResources.supportDirectory.appendingPathComponent("artwork",isDirectory:true)
     static func save(_ artwork: StoryArtwork, data: Data) throws {
         guard UUID(uuidString:artwork.id) != nil else { throw PartnerError.message("配图记录不可用。") }
         guard let source = CGImageSourceCreateWithData(data as CFData,nil), let image = CGImageSourceCreateImageAtIndex(source,0,nil), image.width > 0, image.height > 0, image.width <= 4096, image.height <= 4096 else { throw PartnerError.message("这张画没有生成完整，请再试一次。") }
@@ -49,10 +51,10 @@ enum ArtworkArchive {
         try JSONEncoder().encode(artwork).write(to:directory.appendingPathComponent(artwork.id+".json"),options:.atomic)
     }
     static func remove(_ artwork: StoryArtwork) { guard UUID(uuidString:artwork.id) != nil else { return }; try? FileManager.default.removeItem(at:artwork.url);try? FileManager.default.removeItem(at:directory.appendingPathComponent(artwork.id+".json")) }
-    static func clear(storyID: String? = nil) {
+    static func clear(storyID: String? = nil, keepingIDs: Set<String> = []) {
         guard directory.path == directory.resolvingSymlinksInPath().path else { return }
         for file in (try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil)) ?? [] where file.pathExtension == "json" {
-            guard let data=try? Data(contentsOf:file),let art=try? JSONDecoder().decode(StoryArtwork.self,from:data),storyID == nil || art.storyID == storyID else {continue}
+            guard let data=try? Data(contentsOf:file),let art=try? JSONDecoder().decode(StoryArtwork.self,from:data),!keepingIDs.contains(art.id),storyID == nil || art.storyID == storyID else {continue}
             remove(art)
         }
     }

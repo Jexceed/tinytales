@@ -166,6 +166,42 @@ import Combine
         storySession.current=target.story;storySession.currentPictureID=target.pictureID
         engine?.seedHistory(history);rememberSidebarPositions()
     }
+    func deleteConversation(_ id:String) {
+        guard let target=conversations.first(where:{$0.id == id || $0.navigationID == id}) else { return }
+        let selected=target.id == selectedConversationID
+        let cached=conversationCache[target.id]
+        var storyIDs=selected ? associatedStoryIDs : cached?.associatedStoryIDs ?? []
+        if let storyID=target.storyID {storyIDs.insert(storyID)}
+        if let storyID=(selected ? storySession.current : cached?.story)?.id {storyIDs.insert(storyID)}
+        let targetMessages=selected ? messages : cached?.messages ?? []
+        var otherStoryIDs:Set<String>=[],otherArtworkIDs:Set<String>=[]
+        for saved in conversationCache.values where saved.id != target.id && saved.id != selectedConversationID {
+            otherStoryIDs.formUnion(saved.associatedStoryIDs)
+            if let storyID=saved.linkedStoryID {otherStoryIDs.insert(storyID)}
+            if let storyID=saved.story?.id {otherStoryIDs.insert(storyID)}
+            otherArtworkIDs.formUnion(saved.messages.compactMap{$0.artwork?.id})
+        }
+        if !selected && isConversationStarted {
+            otherStoryIDs.formUnion(associatedStoryIDs)
+            if let linkedStoryID {otherStoryIDs.insert(linkedStoryID)}
+            if let storyID=storySession.current?.id {otherStoryIDs.insert(storyID)}
+            otherArtworkIDs.formUnion(messages.compactMap{$0.artwork?.id})
+        }
+        do {
+            let removedStoryIDs=storyIDs.subtracting(otherStoryIDs)
+            try store.deleteConversationStories(removedStoryIDs,preservingArtworkIDs:otherArtworkIDs)
+            for art in targetMessages.compactMap(\.artwork) where !otherArtworkIDs.contains(art.id) {ArtworkArchive.remove(art)}
+            conversationCache.removeValue(forKey:target.id)
+            runtimeConversationIDs.removeAll{$0 == target.id}
+            sidebarOrder.removeAll{$0 == target.navigationID || ($0.hasPrefix("archive:") && removedStoryIDs.contains(String($0.dropFirst("archive:".count))))}
+            if selected {
+                // Mark it unstarted before cancellation callbacks can checkpoint it.
+                isConversationStarted=false;draft=pendingNewDraft
+                newConversation()
+            }
+            refresh()
+        } catch { self.error=error.localizedDescription }
+    }
     func newConversation(forgettingHistory:Bool=false) {
         cancel()
         if forgettingHistory || conversationRevision != store.revision {conversationCache.removeAll();runtimeConversationIDs.removeAll();pendingNewDraft=""}
