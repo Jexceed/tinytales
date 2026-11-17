@@ -50,6 +50,7 @@ import AppKit
     private var drain:Task<Void,Never>?
     var playedMilliseconds:Int {simulatePlayback ? min(outputFrames*1000/24000,Int((pausedAt ?? Date()).timeIntervalSince(playbackStart)*1000)) : 1200}
     var starts = 0, stops = 0, outputStops = 0
+    var lastOutputStopDate:Date?
     var received = Data()
     var startError: Error?
     func start() throws { starts += 1; if let startError { throw startError } }
@@ -65,7 +66,7 @@ import AppKit
     }
     func pauseOutput() {guard !paused else{return};pauses+=1;paused=true;pausedAt=Date();drain?.cancel();drain=nil}
     func resumeOutput() {guard paused else{return};resumes+=1;paused=false;if let pausedAt{playbackStart=playbackStart.addingTimeInterval(Date().timeIntervalSince(pausedAt))};pausedAt=nil;if ended{outputEnded()}}
-    func stopOutput() { outputStops += 1;drain?.cancel();drain=nil;outputItem="";outputFrames=0;paused=false;pausedAt=nil;ended=false }
+    func stopOutput() { outputStops += 1;lastOutputStopDate=Date();drain?.cancel();drain=nil;outputItem="";outputFrames=0;paused=false;pausedAt=nil;ended=false }
     func stop() { stops += 1;drain?.cancel();drain=nil;outputItem="";outputFrames=0;paused=false;pausedAt=nil;ended=false }
 }
 @MainActor final class ObservedWire: RealtimeWire {
@@ -73,10 +74,11 @@ import AppKit
     var onError: ((String) -> Void)?
     var sentTypes: [String] = []
     var observe: (([String:Any])->Void)?
+    var observeSent: (([String:Any])->Void)?
     let wire: OpenAIRealtimeWire
     init(key: String) { wire = OpenAIRealtimeWire(key: key,model:"gpt-realtime-2.1"); wire.onEvent = { [weak self] in self?.observe?($0);self?.onEvent?($0) }; wire.onError = { [weak self] in self?.onError?($0) } }
     func connect() { wire.connect() }
-    func send(_ event: [String: Any]) async throws { sentTypes.append(event["type"] as? String ?? ""); try await wire.send(event) }
+    func send(_ event: [String: Any]) async throws { sentTypes.append(event["type"] as? String ?? "");observeSent?(event); try await wire.send(event) }
     func close() { wire.close() }
 }
 func require(_ value: @autoclosure () throws -> Bool, _ reason: String) throws { if try !value() { throw PartnerError.message("TEST: \(reason)") } }
@@ -101,6 +103,10 @@ func wav(_ pcm: Data) -> Data {
         let artworkDirectory=FileManager.default.temporaryDirectory.appendingPathComponent("tinytales-phone-artwork-"+UUID().uuidString)
         ArtworkArchive.directory=artworkDirectory
         defer {try? FileManager.default.removeItem(at:artworkDirectory)}
+        if CommandLine.arguments.contains("--soft-voice-profile") {await softVoiceComparisonLive();return}
+        if CommandLine.arguments.contains("--voice-accuracy-live") {await voiceAccuracyLive();return}
+        if CommandLine.arguments.contains("--recognition-regression-live") {await recognitionRegressionLive();return}
+        if CommandLine.arguments.contains("--voice-scenarios-live") {await voiceScenariosLive();return}
         if CommandLine.arguments.contains("--artwork-live") {await artworkPhoneLive();return}
         if CommandLine.arguments.contains("--voice-intent-live") {await voiceIntentLive();return}
         if CommandLine.arguments.contains("--duplex-live") || CommandLine.arguments.contains("--turns-live") {await duplexLive();return}
@@ -484,7 +490,7 @@ func wav(_ pcm: Data) -> Data {
                 try await Task.sleep(nanoseconds:100_000_000)
                 try require(wire.sent.filter{$0["type"] as? String == "response.create"}.count == before,"old tool resumed in the new turn")
             })
-        ] + voiceTurnTestCases() + teacherSpeechTestCases() + naturalTurnTestCases()
+        ] + voiceTurnTestCases() + teacherSpeechTestCases() + naturalTurnTestCases() + classicalKnowledgePhoneTestCases() + voiceReliabilityTestCases() + conversationLabelsPhoneTestCases() + backgroundConversationPhoneTestCases()
         for (name,test) in cases { do {try await test();passed += 1;print("PASS phone \(name)")}catch{print("FAIL phone \(name): \(error.localizedDescription)")} }
         print("Phone tests: \(passed)/\(cases.count) passed");if passed != cases.count {exit(1)}
     }

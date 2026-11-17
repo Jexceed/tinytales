@@ -2,26 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>小小故事屋</string>
 	<key>CFBundleDisplayName</key>
 	<string>小小故事屋</string>
 	<key>CFBundleExecutable</key>
 	<string>TinyTales</string>
+	<key>CFBundleIconFile</key>
+	<string>TinyTales.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.jexceed.tinytales</string>
+	<key>CFBundleName</key>
+	<string>小小故事屋</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.15.0</string>
+	<string>0.18.0</string>
 	<key>CFBundleVersion</key>
-	<string>26</string>
-	<key>CFBundleIconFile</key>
-	<string>TinyTales.icns</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>34</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.education</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>

@@ -88,6 +88,8 @@ struct ChatMessage: Identifiable {
     var source: String = "cloud"
     var externalID: String?
     var isStreaming = false
+    var isRetracted = false
+    var isInterrupted = false
     var artwork: StoryArtwork?
     var suggestions:[String] = []
 }
@@ -167,7 +169,12 @@ struct ConversationItem:Identifiable {
     var title:String
     var storyID:String?
     var rowID:String? = nil
+    var updatedAt:Date? = nil
+    var isGenerating=false
+    var hasUnreadReply=false
+    var hasError=false
     var navigationID:String {rowID ?? id}
+    var statusLabel:String {isGenerating ? "正在生成" : hasError ? "回复失败" : hasUnreadReply ? "有新回复" : ""}
 }
 /// Runtime state only. Raw conversations and drafts are never written to SQLite.
 struct ConversationSnapshot {
@@ -183,6 +190,11 @@ struct ConversationSnapshot {
     var hasStarted=false
     var navigationID:String? = nil
     var associatedStoryIDs:Set<String> = []
+    var updatedAt:Date? = nil
+    var busy=false
+    var activity=""
+    var error=""
+    var hasUnreadReply=false
 }
 extension Story {
     var resumeText:String {

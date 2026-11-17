@@ -106,7 +106,7 @@ struct MainView:View {
                             ConversationWelcome(model:model).frame(maxWidth:.infinity).padding(.top,44).padding(.bottom,24)
                         }
                         ForEach(conversation) {message in
-                            MessageView(message:message,onRead:message.isStreaming || model.inCall ? nil : {model.voice.speak(message.text)})
+                            MessageView(message:message,onRead:message.isStreaming || model.inCall || message.isRetracted ? nil : {model.voice.speak(message.text)},onEdit:model.canCorrectVoice(message) ? {model.editVoiceInput(message.externalID)} : nil,onRetry:model.canCorrectVoice(message) ? {model.retryVoiceInput(message.externalID)} : nil)
                                 .id(message.id)
                         }
                         if (model.busy && !conversation.contains(where:{$0.isStreaming})) || !model.artworkActivity.isEmpty {
@@ -144,14 +144,27 @@ struct MainView:View {
                             HStack(spacing:0) {
                                 Button {model.selectConversation(item.id)} label:{
                                   HStack(alignment:.top,spacing:9) {
-                                    Image(systemName:item.storyID == nil ? (selected ? "bubble.left.fill" : "bubble.left") : (selected ? "book.closed.fill" : "book.closed"))
-                                        .font(.system(size:14)).frame(width:17).padding(.top,2)
-                                    Text(item.title).font(.system(size:15,weight:selected ? .semibold : .medium)).lineLimit(2).multilineTextAlignment(.leading)
+                                    Group {
+                                        if item.isGenerating {ProgressView().controlSize(.small)}
+                                        else if item.hasError {Image(systemName:"exclamationmark.circle").foregroundStyle(Color(red:0.72,green:0.35,blue:0.14))}
+                                        else {Image(systemName:item.storyID == nil ? (selected ? "bubble.left.fill" : "bubble.left") : (selected ? "book.closed.fill" : "book.closed"))}
+                                    }.font(.system(size:14)).frame(width:17).padding(.top,2)
+                                    VStack(alignment:.leading,spacing:4) {
+                                        Text(item.title).font(.system(size:15,weight:selected ? .semibold : .medium)).lineLimit(2).multilineTextAlignment(.leading)
+                                        Text(ConversationLabels.timestamp(item.updatedAt)).font(.system(size:11)).monospacedDigit().foregroundStyle(Color.quiet)
+                                            .lineLimit(1).minimumScaleFactor(0.9)
+                                    }
                                     Spacer(minLength:0)
                                   }.padding(.leading,11).padding(.trailing,3).padding(.vertical,11).frame(maxWidth:.infinity,alignment:.leading)
                                     .contentShape(RoundedRectangle(cornerRadius:10))
                                 }.buttonStyle(StoryButtonStyle()).disabled(model.inCall && !selected).opacity(model.inCall && !selected ? 0.5 : 1)
                                 .accessibilityAddTraits(selected ? [.isSelected] : [])
+                                .accessibilityLabel(item.title+"，"+ConversationLabels.timestamp(item.updatedAt,full:true))
+                                .accessibilityValue(item.statusLabel)
+                                .help(item.title+"\n"+ConversationLabels.timestamp(item.updatedAt,full:true)+(item.statusLabel.isEmpty ? "" : "\n"+item.statusLabel))
+                                if item.hasUnreadReply && !selected {
+                                    Circle().fill(Color.sage).frame(width:6,height:6).padding(.trailing,4).accessibilityLabel("有新回复")
+                                }
                                 Menu {
                                     Button(role:.destructive) {deletionCandidate=item} label:{Label("删除对话…",systemImage:"trash")}
                                 } label:{Image(systemName:"ellipsis").font(.system(size:14,weight:.semibold)).frame(width:25,height:30).contentShape(Rectangle())}
@@ -167,7 +180,7 @@ struct MainView:View {
                 }
             }.frame(maxHeight:.infinity,alignment:.top)
             Button {model.showParent=true} label:{Label("设置",systemImage:"gearshape").font(.system(size:15,weight:.medium)).foregroundStyle(Color.quiet).frame(maxWidth:.infinity,alignment:.leading).padding(10)}.buttonStyle(.plain)
-        }.padding(16).frame(width:198).frame(maxHeight:.infinity,alignment:.top).background(Color.sidebarPaper.opacity(0.28))
+        }.padding(16).frame(width:236).frame(maxHeight:.infinity,alignment:.top).background(Color.sidebarPaper.opacity(0.28))
     }
     private var header:some View {
         HStack(spacing:10) {
@@ -272,11 +285,13 @@ struct NativeComposer: View {
 struct MessageView: View {
     var message: ChatMessage
     var onRead: (() -> Void)? = nil
+    var onEdit: (() -> Void)? = nil
+    var onRetry: (() -> Void)? = nil
     private var preferredWidth: CGFloat {
         if message.artwork != nil || message.sceneID != nil || message.word != nil { return 600 }
         let font = NSFont.systemFont(ofSize: 18, weight: .medium)
         let lineWidth = message.text.components(separatedBy: .newlines).map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
-        return min(message.isUser ? 490 : 700, max(message.isUser ? 145 : 300, ceil(lineWidth) + 38))
+        return min(message.isUser ? 490 : 700, max(message.isUser ? (onEdit != nil || message.isRetracted ? 220 : 145) : 300, ceil(lineWidth) + 38))
     }
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -287,6 +302,8 @@ struct MessageView: View {
                     else { UnicornPicture().frame(width: 28, height: 28).background(.white.opacity(0.6), in: Circle()) }
                     Text(message.isUser ? "我说" : message.source == "archive" ? "上次讲到" : "莉莉说").font(.system(size: 14, weight: .bold, design: .rounded))
                     Spacer()
+                    if message.isRetracted {Text("已撤回").font(.system(size:13)).foregroundStyle(Color.quiet)}
+                    else if message.isInterrupted {Text("已停止").font(.system(size:13)).foregroundStyle(Color.quiet)}
                     if !message.isUser, !message.isStreaming, let onRead { Button(action: onRead) { Label("再听", systemImage: "speaker.wave.2.fill").font(.system(size: 16, weight: .medium)).padding(.horizontal, 10).padding(.vertical, 6).background(.white.opacity(0.7), in: Capsule()) }.buttonStyle(.plain) }
                 }
                 if let artwork = message.artwork, let image = NSImage(contentsOf:artwork.url) {
@@ -298,7 +315,13 @@ struct MessageView: View {
                 if let id = message.sceneID, let scene = Scene.all.first(where: { $0.id == id }), let url = scene.url, let image = NSImage(contentsOf: url) {
                     VStack(alignment: .leading, spacing: 12) { Image(nsImage: image).resizable().scaledToFit().frame(width: min(420, 240 * image.size.width / max(1, image.size.height))).clipShape(RoundedRectangle(cornerRadius: 18)); Text("看图素材 · " + scene.title).font(.system(size: 23, weight: .bold, design: .rounded)) }
                 }
-                Text(message.text).font(.system(size: 18, weight: .regular, design: .rounded)).lineSpacing(5).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Text(message.text).strikethrough(message.isRetracted).foregroundStyle(message.isRetracted ? Color.quiet : Color.ink).font(.system(size: 18, weight: .regular, design: .rounded)).lineSpacing(5).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                if onEdit != nil || onRetry != nil {
+                    HStack(spacing:16) {
+                        if let onRetry {Button(action:onRetry) {Label("重说",systemImage:"arrow.counterclockwise")} }
+                        if let onEdit {Button(action:onEdit) {Label("改文字",systemImage:"pencil")} }
+                    }.font(.system(size:14,weight:.medium)).buttonStyle(.plain).foregroundStyle(Color.sage).frame(maxWidth:.infinity,alignment:.trailing)
+                }
                 if message.isStreaming { HStack(spacing:5) { ForEach(0..<3) { _ in Circle().fill(Color.sage.opacity(0.5)).frame(width:4,height:4) } }.accessibilityLabel("正在生成") }
                 if let word = message.word {
                     HStack(spacing: 22) { VStack(alignment: .leading, spacing: 7) { Text(word.pinyin).font(.system(size: 18)); Text(word.hanzi).font(.system(size: 34, weight: .bold, design: .rounded)).tracking(4) }; Spacer(); Text(word.english).font(.system(size: 23, weight: .medium, design: .rounded)) }.padding(19).toyCard(.mint, Color.sage.opacity(0.3), radius: 18)

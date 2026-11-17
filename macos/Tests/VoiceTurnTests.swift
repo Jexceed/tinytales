@@ -32,7 +32,7 @@ import Foundation
             try require(count(wire,"response.create")==0,"response skipped the endpoint settling interval")
             await segment(wire,"second");await transcript(wire,"second","小马过河的故事")
             try await waitFor({count(wire,"response.create")==1},seconds:1)
-            try require(users==["给我讲一个","小马过河的故事"],"the second clause lost the first clause")
+            try require(users==["给我讲一个小马过河的故事"],"one spoken turn was split into separate user messages")
             await segment(wire,"third");await transcript(wire,"third","再讲个故事")
             await segment(wire,"stop");await transcript(wire,"stop","停一下")
             try require(call.state == .listening && !call.listeningHint.isEmpty,"a stop after a pending request was delayed")
@@ -109,11 +109,11 @@ import Foundation
             wire.emit(["type":"input_audio_buffer.speech_stopped","item_id":"second"]);await settle()
             wire.emit(["type":"input_audio_buffer.committed","item_id":"second"]);await settle()
             await transcript(wire,"second","主角是一匹小马。")
-            try require(users==["给我讲个故事。","主角是一匹小马。"] && count(wire,"response.create")==1,"phrases were split into competing replies")
+            try require(users==["给我讲个故事。主角是一匹小马。"] && count(wire,"response.create")==1,"phrases were split into competing messages or replies")
             await segment(wire,"third");await segment(wire,"fourth")
             await transcript(wire,"fourth","名字叫小雨。")
             await transcript(wire,"third","小马是蓝色的。")
-            try require(Array(users.suffix(2))==["小马是蓝色的。","名字叫小雨。"] && count(wire,"response.create")==2,"completion order replaced speaking order")
+            try require(users==["给我讲个故事。主角是一匹小马。","小马是蓝色的。名字叫小雨。"] && count(wire,"response.create")==2,"completion order replaced speaking order or merged a later turn")
         }),
         ("playback echo cannot request a continuation and a short stop still works",{
             let (wire,audio,call)=try await ready();defer{call.hangUp()}

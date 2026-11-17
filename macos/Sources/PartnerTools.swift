@@ -40,6 +40,11 @@ struct PartnerToolResult {
         var result: Any = ["error": "unknown_tool"]
         var outputImage: Data?
         switch name {
+        case "lookup_classics":
+            let query=String((args["query"] as? String ?? "").prefix(600))
+            let entries=ClassicalKnowledge.search(query,kind:args["kind"] as? String ?? "all")
+            result=try ClassicalKnowledge.payload(entries,query:query)
+            activities.append(entries.isEmpty ? "这篇还没有收进资料本" : "翻了翻成语和古诗资料本")
         case "recall_memories":
             result = settings.memoryEnabled ? try store.memories().filter { $0.status == "approved" }.map { ["kind": $0.kind, "text": $0.text] } : []
             activities.append("翻了翻记忆小花园")
@@ -74,7 +79,7 @@ struct PartnerToolResult {
             let givenID = args["id"] as? String
             if let id = givenID, !(try store.stories()).contains(where: { $0.id == id && $0.source == "cloud" }) && !stagedStories.contains(where: { $0.id == id }) { throw PartnerError.message("这个故事本已经不在这里了。") }
             guard !title.isEmpty, title.count <= 35, !summary.isEmpty, summary.count <= 5000, !Safety.isPrivate(title + summary), !Safety.isRisk(title + summary) else { throw PartnerError.message("故事里有些内容暂时不适合保存。") }
-            let story = Story(id: givenID ?? UUID().uuidString, title: title, summary: summary)
+            let story = Story(id: givenID ?? UUID().uuidString, title: ConversationLabels.storyTitle([title],summary:summary), summary: summary)
             stagedStories.removeAll { $0.id == story.id }; stagedStories.append(story)
             result = ["id": story.id, "saved_after_reply_review": true]; activities.append("给故事夹上了一张小书签")
         case "propose_memory":
@@ -111,7 +116,6 @@ struct PartnerToolResult {
         guard selectedArtwork == nil, selectedScene == nil || (reply.classificationPresent && reply.narrative), !StoryIntent.illustration(text),
               reply.narrative || (!reply.classificationPresent && (!stagedStories.isEmpty || StoryIntent.narrative(text))),
               !Safety.isPrivate(reply.reply), !Safety.isRisk(reply.reply) else { return }
-        let title = String((!reply.storyTitle.isEmpty ? reply.storyTitle : stagedStories.last?.title ?? selectedNarrative?.title ?? "新的小冒险").prefix(35))
         let id = stagedStories.last?.id ?? selectedNarrative?.id ?? UUID().uuidString
         let startsAnother = stagedStories.last.map { $0.id != selectedNarrative?.id } ?? false
         let previous = startsAnother ? "" : (selectedNarrative?.summary ?? "")
@@ -119,6 +123,7 @@ struct PartnerToolResult {
         let canonical = reply.storyState.trimmingCharacters(in:.whitespacesAndNewlines)
         // Structured state replaces the old draft, so corrections do not coexist with obsolete facts.
         let narrative = !canonical.isEmpty && canonical.count <= 3000 && !Safety.isPrivate(canonical) && !Safety.isRisk(canonical) ? (canonical.contains(reply.reply) ? canonical : canonical + "\n刚刚讲到：" + reply.reply) : String(combined.suffix(4500))
+        let title=ConversationLabels.storyTitle([reply.storyTitle,stagedStories.last?.title ?? "",startsAnother ? "" : selectedNarrative?.title ?? ""],summary:narrative)
         pendingNarrative = Story(id:id,title:title,summary:narrative)
         stagedStories.removeAll { $0.id == id }; stagedStories.append(pendingNarrative!)
     }

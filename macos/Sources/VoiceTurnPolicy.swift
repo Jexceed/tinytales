@@ -18,7 +18,7 @@ enum VoiceTurnPolicy {
         return value
     }
     private static let stopPrefixes=["先停一下","先停下来","先停下","暂停一下","停一下","停下来","停下","停止","暂停","不要讲了","别讲了","不要说了","别说了","先别讲","先别说","等一下","等我一下","等一等","等会儿","先等一下","先等等","等等"]
-    private static let floorPrefixes=["听我说","先听我说","让我说","让我先说","我想说","我有话要说","我有一个问题","我想问个问题","我想问一下","我想问你","不对"]
+    private static let floorPrefixes=["听我说","先听我说","听一下","让我说","让我先说","我想说","我有话要说","我有一个问题","我想问个问题","我想问一下","我想问你","不对"]
     static func isUrgent(_ text:String,partial:Bool=false)->Bool {
         let raw=text.trimmingCharacters(in:.whitespacesAndNewlines)
         if let first=raw.first,"“‘「『\"".contains(first) {return false}
@@ -50,10 +50,35 @@ enum VoiceTurnPolicy {
         let value=text.trimmingCharacters(in:.whitespacesAndNewlines)
         return value.hasSuffix("？") || value.hasSuffix("?")
     }
+    static func addressesLily(_ text:String)->Bool {
+        normalizedContent(text).range(of:"^(?:喂|那个|嗯|请)?(?:莉莉|丽丽)",options:.regularExpression) != nil
+    }
+    /// These are textual clues about the recipient, never speaker identities.
+    /// A name alone is insufficient to reject a turn (e.g. “妈妈为什么会累”).
+    static func needsAddressReview(_ text:String)->Bool {
+        guard !addressesLily(text) else{return false}
+        let value=normalizedContent(text)
+        return value.range(of:"^(?:请|那个|等一下|停一下|等等)?(?:妈妈|爸爸|爷爷|奶奶|姥姥|姥爷|外公|外婆|哥哥|姐姐|弟弟|妹妹|叔叔|阿姨|老师)",options:.regularExpression) != nil
+            || value.range(of:"(?:电视里|动画片里|他刚才|她刚才|妈妈|爸爸)(?:说|问|喊)|我不是(?:在)?跟你说|我在跟.{1,6}说话",options:.regularExpression) != nil
+            || text.trimmingCharacters(in:.whitespacesAndNewlines).first.map{"“‘「『\"".contains($0)} == true
+    }
+    static func fallbackIntent(_ text:String,context:Context,final:Bool)->VoiceIntent {
+        guard final else{return .undecided}
+        guard !addressesLily(text) else{return .listen}
+        let value=normalizedContent(text)
+        let rolePlay=context.echoTexts.contains{ $0.range(of:"扮演|你来当|假装|角色",options:.regularExpression) != nil }
+        // Only clear household directions are dropped without the model. A family
+        // mention, an unknown addressee or a request about the story still gets a turn.
+        if !rolePlay,value.range(of:"^(?:请|那个|等一下|停一下|等等)?(?:妈妈|爸爸|爷爷|奶奶|姥姥|姥爷|外公|外婆|哥哥|姐姐|叔叔|阿姨)(?:你|请|能不能|可以|帮我|给我|把|帮忙).*(?:拿|递|关|开|买|倒|找|穿|吃饭|喝水|杯子|窗户|衣服)",options:.regularExpression) != nil,
+           value.range(of:"故事|莉莉|声音|音量|讲述|角色|怎么讲|接着讲",options:.regularExpression) == nil {return .keepSpeaking}
+        if value.contains("我不是跟你说") || value.contains("我不是在跟你说") {return .keepSpeaking}
+        return .listen
+    }
     /// Fast paths are deliberately small. Contextual comments go to the intent
     /// model; a completed genuine request falls back to listening on timeout.
-    static func quickIntent(_ text:String,context:Context,final:Bool)->VoiceIntent? {
+    static func quickIntent(_ text:String,context:Context,final:Bool,semanticAddress:Bool=false)->VoiceIntent? {
         let value=normalizedContent(text)
+        if needsAddressReview(text) {return nil}
         if !final,context.overlapsOutput,!context.expectsReply,value.count>=2,
            context.echoTexts.contains(where:{VoiceTurns.normalized($0).contains(value)}) {return .undecided}
         if isUrgent(text,partial:!final) {return isControlOnly(text) ? .stop : .listen}
@@ -61,7 +86,12 @@ enum VoiceTurnPolicy {
         if !final,context.overlapsOutput,["我说","我想说","我有话"].contains(where:{value.hasPrefix($0)}) {return .listen}
         if ["莉莉","丽丽","喂喂","喂喂喂"].contains(value) {return .listen}
         if context.overlapsOutput,!context.expectsReply,VoiceTurns.isEcho(text,of:context.echoTexts) {return .keepSpeaking}
-        if ["妈妈","爸爸","爷爷","奶奶"].contains(where:{commandText(text).hasPrefix($0)}),!context.expectsReply {return nil}
+        // A recited line is meaningful conversation even without a question.
+        // Recipient/quotation and playback-echo checks above still take priority.
+        if final,(!context.overlapsOutput || context.expectsReply),ClassicalKnowledge.exactMatches(text).contains(where:{$0.kind=="poem"}) {return .listen}
+        if final,semanticAddress,value.range(of:"^(?:请|麻烦)?(?:给我|帮我)(?:画|绘|讲|编|读|朗读)",options:.regularExpression) != nil {return .listen}
+        // In production, question words cannot establish whom a question targets.
+        if semanticAddress,!addressesLily(text) {return nil}
         if text.contains("？") || text.contains("?") {return .listen}
         if value.range(of:"为什么|怎么|是不是|能不能|可不可以|什么(?:意思|时候|名字)|哪[里儿个]|多少",options:.regularExpression) != nil {return .listen}
         if ["为什么","怎么","什么","哪里","哪儿","谁","多少","能不能","可不可以","不是","不对","我不想","我不喜欢","我害怕","我有点害怕","换一个","换个","我们换"].contains(where:{value.hasPrefix($0)}) {return .listen}
@@ -69,6 +99,14 @@ enum VoiceTurnPolicy {
         return nil
     }
     static func normalizedContent(_ text:String)->String {VoiceTurns.normalized(text)}
+    static func needsContinuation(_ text:String)->Bool {
+        var value=normalizedContent(text)
+        for _ in 0..<6 {
+            guard let prefix=["嗯","哦","噢","呃","那个","莉莉","丽丽"].first(where:{value.hasPrefix($0)}) else{break}
+            value.removeFirst(prefix.count)
+        }
+        return ["我说","我是说","我说是","我想说","我想说的是","我想问","我想问的是","给我讲一个","帮我讲一个","我想听一个"].contains(value)
+    }
 }
 
 enum StoryParagraphs {

@@ -1,8 +1,27 @@
 import Foundation
 
+/// This only delays an already pending submission while a remote VAD start is
+/// in flight. It neither recognizes words nor grants permission to interrupt.
+struct LocalSpeechContinuation {
+    private var voicedSeconds=0.0
+    private(set) var lastActivity = -Double.infinity
+    mutating func observe(_ pcm:Data,now:Double=ProcessInfo.processInfo.systemUptime) {
+        if AudioMeter.level(pcm)>=0.015 {
+            voicedSeconds+=Double(pcm.count)/48_000
+            if voicedSeconds>=0.08 {lastActivity=now}
+        } else {voicedSeconds=0}
+    }
+    func remainingQuietTime(_ delay:UInt64,now:Double=ProcessInfo.processInfo.systemUptime)->Double {
+        max(0,Double(delay)/1e9-(now-lastActivity))
+    }
+    mutating func reset() {voicedSeconds=0;lastActivity = -Double.infinity}
+}
+
 /// Input items can finish transcription out of order. Each item is accepted once,
 /// and only completed, nonempty user turns authorize a response.
 struct VoiceTurns {
+    // ASR items are acoustic chunks, not complete conversational turns.
+    static let continuationDelay:UInt64 = 1_600_000_000
     struct Segment {
         var id:String
         var committed=false
@@ -28,6 +47,9 @@ struct VoiceTurns {
         guard let i=segments.firstIndex(where:{$0.id==id}),!segments[i].finished else{return nil}
         segments[i].text += text;return segments[i].text
     }
+    mutating func preview(_ id:String,_ text:String) {
+        if let i=segments.firstIndex(where:{$0.id==id}),!segments[i].finished {segments[i].text=text}
+    }
     enum Result {case accepted(String),empty,echo,duplicate}
     mutating func finish(_ id:String,_ text:String,assistantTexts:[String])->Result {
         guard let i=segments.firstIndex(where:{$0.id==id}),!segments[i].finished else{return .duplicate}
@@ -42,7 +64,7 @@ struct VoiceTurns {
         if speakingID==id {speakingID=nil}
     }
     var readySegments:[Segment]? {
-        guard speakingID==nil,!segments.contains(where:{!$0.finished}) else{return nil}
+        guard speakingID==nil,!segments.contains(where:{!$0.finished || ($0.accepted && !$0.committed)}) else{return nil}
         let ready=segments.filter{$0.accepted && !$0.consumed}
         guard !ready.isEmpty else{return nil}
         return ready
@@ -51,6 +73,25 @@ struct VoiceTurns {
         guard let ready=readySegments else{return nil}
         for i in segments.indices where segments[i].accepted && !segments[i].consumed {segments[i].consumed=true}
         return ready
+    }
+    var pendingTranscript:String {
+        Self.join(segments.filter{!$0.consumed && (!$0.finished || $0.accepted)})
+    }
+    func earlierInTurn(before id:String)->String {
+        Self.join(segments.prefix{$0.id != id}.filter{!$0.consumed && (!$0.finished || $0.accepted)})
+    }
+    func hasUnfinished(before id:String)->Bool {
+        segments.prefix{$0.id != id}.contains{!$0.finished}
+    }
+    static func join(_ segments:[Segment])->String {
+        segments.reduce("") { result,segment in
+            let text=segment.text.trimmingCharacters(in:.whitespacesAndNewlines)
+            guard !text.isEmpty else{return result}
+            // Preserve recognizer punctuation; only restore a word boundary
+            // between ASCII clauses, rather than adding Chinese line breaks.
+            let space=result.unicodeScalars.last?.isASCII == true && text.unicodeScalars.first?.isASCII == true
+            return result+(space ? " " : "")+text
+        }
     }
     func isPending(_ id:String)->Bool {segments.contains{$0.id==id && !$0.finished}}
     var hasUnfinished:Bool {speakingID != nil || segments.contains{!$0.finished}}

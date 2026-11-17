@@ -21,7 +21,7 @@ extension AppModel {
     var callVisualMode: CallVisualMode { .resolve(phone?.state, muted: phone?.muted == true) }
     var callVisualLevel: Double { callVisualMode == .speaking ? phone?.outputLevel ?? 0 : phone?.inputLevel ?? 0 }
     var artworkActivity: String { phone?.artworkStatus ?? "" }
-    var callStatusTitle:String { !artworkActivity.isEmpty ? artworkActivity : phone?.state == .speaking && phone?.muted != true ? "莉莉在讲，也在听" : callVisualMode.label }
+    var callStatusTitle:String { !artworkActivity.isEmpty ? artworkActivity : phone?.inputNeedsCorrection == true ? "这句没听清" : phone?.verifyingInput == true && phone?.state != .speaking ? "正在听清这句话" : phone?.state == .speaking && phone?.muted != true ? "莉莉在讲，也在听" : callVisualMode.label }
 }
 struct DuplexLevels:View {
     var input:Double
@@ -83,14 +83,15 @@ struct CallActivityOrb: View {
 struct CallActivityPanel: View {
     @ObservedObject var model: AppModel
     var body: some View {
-        HStack(spacing:18) {
+        VStack(alignment:.leading,spacing:12) {
+          HStack(spacing:18) {
             CallActivityOrb(mode:model.callVisualMode,level:model.callVisualLevel,size:54)
             VStack(alignment:.leading,spacing:6) {
                 Text(model.callStatusTitle).font(.system(size:21,weight:.bold,design:.rounded))
                 if let phone=model.phone,phone.state == .speaking,!phone.listeningHint.isEmpty {
                     Text(phone.listeningHint).font(.system(size:16)).foregroundStyle(Color.quiet)
                 } else if let phone=model.phone, !phone.inputTranscript.isEmpty {
-                    Text("你说："+phone.inputTranscript).font(.system(size:16)).lineLimit(2)
+                    Text((phone.inputPreviewIsFinal ? "你说：" : "暂时听到：")+phone.inputTranscript).font(.system(size:16)).lineLimit(2)
                 } else if let phone=model.phone,!phone.listeningHint.isEmpty {
                     Text(phone.listeningHint).font(.system(size:16)).foregroundStyle(Color.quiet)
                 } else if model.callVisualMode == .listening || model.callVisualMode == .speaking {
@@ -99,8 +100,47 @@ struct CallActivityPanel: View {
             }
             Spacer()
             if model.callVisualMode == .speaking {DuplexLevels(input:model.phone?.inputLevel ?? 0,output:model.phone?.outputLevel ?? 0,muted:model.phone?.muted == true)}
-            Button { model.phone?.toggleMute() } label: { Label(model.phone?.muted == true ? "开麦" : "静音",systemImage:model.phone?.muted == true ? "mic.slash.fill" : "mic.fill").font(.system(size:17,weight:.medium)).padding(11).background(.white.opacity(0.8),in:Capsule()) }.buttonStyle(.plain)
+            Button { model.phone?.toggleMute() } label: { Label(model.phone?.muted == true ? "开麦" : "静音",systemImage:model.phone?.muted == true ? "mic.slash.fill" : "mic.fill").font(.system(size:17,weight:.medium)).padding(11).background(.white.opacity(0.8),in:Capsule()) }.buttonStyle(.plain).disabled(model.isCorrectingVoice)
+          }
+          VoiceCallControls(model:model)
         }.padding(17).foregroundStyle(Color.ink).toyCard(model.callVisualMode.color.opacity(0.12),model.callVisualMode.color.opacity(0.5),radius:22)
+    }
+}
+struct VoiceCallControls:View {
+    @ObservedObject var model:AppModel
+    var compact=false
+    var body:some View {
+        VStack(alignment:.leading,spacing:10) {
+            HStack(spacing:14) {
+                Button {model.stopVoiceTurn()} label:{Label("停下",systemImage:"stop.fill").font(.system(size:compact ? 15 : 17,weight:.semibold))}
+                    .buttonStyle(.borderedProminent).tint(Color(red:0.80,green:0.24,blue:0.32)).disabled(model.phone?.canStopCurrentTurn != true).help("停止本轮，保持电话接通")
+                if model.phone?.hasPendingVoiceInput == true,!model.isCorrectingVoice {
+                    Button("取消这句") {model.cancelVoiceInput()}
+                    if model.phone?.inputTranscript.isEmpty == false {Button("改文字") {model.editVoiceInput()}}
+                }
+                if model.phone?.verifyingInput == true {ProgressView().controlSize(.small).accessibilityLabel("正在听清这句话")}
+                Spacer(minLength:0)
+            }.font(.system(size:compact ? 14 : 16,weight:.medium))
+            if model.isCorrectingVoice {VoiceCorrectionEditor(model:model)}
+            else if compact,let phone=model.phone,let id=phone.latestVoiceInputID,let text=phone.latestVoiceInputText {
+                VStack(alignment:.leading,spacing:7) {
+                    Text("刚才："+text).font(.system(size:14)).lineLimit(2)
+                    HStack(spacing:16) {Button("重说") {model.retryVoiceInput(id)};Button("改文字") {model.editVoiceInput(id)}}.font(.system(size:14,weight:.medium))
+                }
+            }
+        }
+    }
+}
+struct VoiceCorrectionEditor:View {
+    @ObservedObject var model:AppModel
+    @FocusState private var focused:Bool
+    var body:some View {
+        VStack(alignment:.leading,spacing:9) {
+            Text("把刚才的话改一下").font(.system(size:15,weight:.semibold))
+            TextField("你原本想说什么？",text:$model.voiceCorrectionText,axis:.vertical)
+                .textFieldStyle(.plain).font(.system(size:17)).lineLimit(2...5).padding(10).background(.white,in:RoundedRectangle(cornerRadius:10)).focused($focused)
+            HStack {Text("修改时暂停收音").font(.system(size:12)).foregroundStyle(Color.quiet);Spacer();Button("取消") {model.cancelVoiceCorrection()};Button("发送修改") {model.sendVoiceCorrection()}.buttonStyle(.borderedProminent).disabled(model.voiceCorrectionText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || model.voiceCorrectionText.count>600)}
+        }.onAppear{focused=true}
     }
 }
 struct ActivityWave: View {

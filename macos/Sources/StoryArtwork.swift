@@ -64,6 +64,7 @@ enum StoryIntent {
         !Safety.matches(text,"不[要用想].{0,4}新故事") && Safety.matches(text,"(?:开始|编|讲|来).{0,6}(?:全新|新的|新故事)|换.{0,12}故事(?:吧|。|！|$|，|,)|重新编")
     }
     static func illustration(_ text: String) -> Bool {
+        if Safety.matches(text,"(?:这个词|这句话)(?:是)?(?:什么意思|怎么读|怎么说)") {return false}
         if Safety.matches(text,"图库|素材"), !Safety.matches(text,"重新画|再画|生成|画出来") { return false }
         if Safety.matches(text,"(?:不要|不用|别|不想|不需要).{0,3}(?:画|绘|生成.{0,3}图)|我(?:喜欢|学|正在|在)画画|教我.{0,5}画") {
             let tail = text.components(separatedBy:CharacterSet(charactersIn:"，,；;")).last ?? text

@@ -16,9 +16,9 @@ import Foundation
     typealias Fixture=(wire:TestWire,audio:SilentCallAudio,speech:FakeTeacherSpeech,call:RealtimeCall)
     let first="小兔抱着红苹果，沿着花园的小路走。它轻轻敲门，奶奶笑着打开了门。"
     let second="奶奶拿出蓝盘子，小兔把苹果放进去。它们坐到窗边，一起看院子里的花。"
-    func fixture(timeout:UInt64=12_000_000_000,judge:VoiceIntentJudging?=nil,intentTimeout:UInt64=1_200_000_000) async throws -> Fixture {
+    func fixture(timeout:UInt64=12_000_000_000,judge:VoiceIntentJudging?=nil,intentTimeout:UInt64=1_200_000_000,commitDelay:UInt64=0) async throws -> Fixture {
         let wire=TestWire(),audio=SilentCallAudio(),speech=FakeTeacherSpeech();audio.manualDrain=true
-        let call=RealtimeCall(store:try phoneFixture(),wire:wire,audio:audio,permission:{true},voice:"teacher",transcriptionTimeout:timeout,inputCommitDelay:0,teacherSpeech:speech,intentJudge:judge,intentTimeout:intentTimeout)
+        let call=RealtimeCall(store:try phoneFixture(),wire:wire,audio:audio,permission:{true},voice:"teacher",transcriptionTimeout:timeout,inputCommitDelay:commitDelay,teacherSpeech:speech,intentJudge:judge,intentTimeout:intentTimeout)
         try await call.connect(history:[],microphone:true,greet:false)
         wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
         return (wire,audio,speech,call)
@@ -40,6 +40,176 @@ import Foundation
     }
     func close(_ f:Fixture) {f.call.hangUp();f.speech.finish()}
     return [
+        ("VT-014 direct partner requests have a fast path without accepting named bystander requests",{
+            for text in ["给我画一张图片","帮我讲一个故事","请给我读一首诗"] {
+                try require(VoiceTurnPolicy.quickIntent(text,context:.init(),final:true,semanticAddress:true) == .listen,"a clear partner request waits for another classifier")
+            }
+            for text in ["小明，给我画一张图片","妈妈，帮我讲一个故事","电视里说给我画一张图片","“给我画一张图片”是什么意思"] {
+                try require(VoiceTurnPolicy.quickIntent(text,context:.init(),final:true,semanticAddress:true)==nil,"a bystander or quote used the direct-request fast path")
+            }
+        }),
+        ("VT-019 local resumed speech blocks submission before the delayed server VAD arrives",{
+            let f=try await fixture(commitDelay:160_000_000);defer{close(f)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"first",text:"我们来讲")
+            try await Task.sleep(nanoseconds:100_000_000)
+            f.audio.onMicrophone?(Data(repeating:3,count:4800));await settle()
+            try await Task.sleep(nanoseconds:100_000_000)
+            try require(users.isEmpty && count(f.wire,"response.create")==0,"local speech was ignored until the server start event")
+            await segment(f,"second",text:"一个小猫的故事。")
+            try await waitFor({users.count==1},seconds:1)
+            try require(users==["我们来讲一个小猫的故事。"],"the delayed VAD split a resumed turn")
+        }),
+        ("VT-019 brief noise does not renew the quiet window or create a request",{
+            var gate=LocalSpeechContinuation()
+            gate.observe(Data(repeating:3,count:960),now:1)
+            gate.observe(Data(repeating:0,count:960),now:1.02)
+            try require(gate.remainingQuietTime(VoiceTurns.continuationDelay,now:1.1)==0,"one short noise burst postponed the turn")
+            gate.observe(Data(repeating:3,count:4800),now:2)
+            try require(gate.remainingQuietTime(VoiceTurns.continuationDelay,now:3.2)>0.39,"local speech did not preserve the 1.6 second quiet window")
+            gate.reset();try require(gate.remainingQuietTime(VoiceTurns.continuationDelay,now:3.2)==0,"cancel retained old activity")
+        }),
+        ("VT-020 incomplete spoken lead-in waits beyond the normal deadline and keeps the next clause",{
+            let f=try await fixture(commitDelay:80_000_000);defer{close(f)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"lead",text:"哦，我说……")
+            try await Task.sleep(nanoseconds:200_000_000)
+            try require(users.isEmpty && count(f.wire,"response.create")==0,"an unfinished lead-in triggered a reply")
+            await segment(f,"quote",text:"举头望明月。")
+            try await waitFor({users.count==1},seconds:1)
+            try require(users==["哦，我说……举头望明月。"],"the complete turn lost its lead-in")
+        }),
+        ("VT-020 final semantic wait is retained until a later completed clause",{
+            let judge=TestVoiceIntent();judge.replies=[.undecided,.listen]
+            let f=try await fixture(judge:judge,commitDelay:70_000_000);defer{close(f);judge.finish(.listen)}
+            await segment(f,"lead",text:"小兔把那个")
+            try await Task.sleep(nanoseconds:170_000_000)
+            try require(count(f.wire,"response.create")==0,"final wait was converted into permission to answer")
+            await segment(f,"end",text:"苹果送给了奶奶。")
+            try await waitFor({count(f.wire,"response.create")==1},seconds:1)
+        }),
+        ("VT-020 a recognized recited poem completes a lead-in instead of being dropped as backchannel",{
+            let judge=TestVoiceIntent();judge.replies=[.listen,.keepSpeaking]
+            let f=try await fixture(judge:judge,commitDelay:70_000_000);defer{close(f);judge.finish(.listen)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"lead",text:"哦，我说")
+            try await Task.sleep(nanoseconds:150_000_000)
+            await segment(f,"poem",text:"举头望明月。")
+            try await waitFor({users.count==1},seconds:1)
+            try require(users[0].contains("举头望明月") && judge.queries.count==1,"a known recitation was treated as meaningless background speech")
+            try require(VoiceTurnPolicy.quickIntent("妈妈，举头望明月",context:.init(),final:true,semanticAddress:true)==nil,"poem shortcut bypassed recipient review")
+        }),
+        ("VT-016 a natural pause keeps the default conversation window open and renewed speech cancels the old deadline",{
+            let wire=TestWire(),audio=SilentCallAudio()
+            // Exercise the production default, rather than a shorter test delay.
+            let call=RealtimeCall(store:try phoneFixture(),wire:wire,audio:audio,permission:{true})
+            defer{call.hangUp()}
+            var users:[String]=[];call.onUserText={_,text in users.append(text)}
+            try await call.connect(history:[],microphone:false,greet:false)
+            wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"first"]);await settle()
+            await wire.finishInput("first","我们来讲")
+            try await Task.sleep(nanoseconds:1_200_000_000)
+            try require(users.isEmpty && count(wire,"response.create")==0 && call.state == .listening,"the natural pause was treated as a finished turn")
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"second"]);await settle()
+            wire.emit(["type":"conversation.item.input_audio_transcription.delta","item_id":"second","delta":"一个老巫婆"]);await settle()
+            try require(call.inputTranscript=="我们来讲一个老巫婆","continued speech hid the first clause")
+            try await Task.sleep(nanoseconds:500_000_000)
+            try require(users.isEmpty && count(wire,"response.create")==0,"the first deadline answered while the user was still speaking")
+            await wire.finishInput("second","一个老巫婆的故事。")
+            let completed=Date()
+            try await waitFor({count(wire,"response.create")==1},seconds:1.95)
+            try require(Date().timeIntervalSince(completed)<1.95,"the old two-second continuation delay remained")
+            try require(users==["我们来讲一个老巫婆的故事。"],"continuation was not submitted as one complete turn")
+        }),
+        ("VT-016 a confirmed stop bypasses continuation waiting and cancels earlier clauses",{
+            let f=try await fixture(commitDelay:200_000_000);defer{close(f)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            try await start(f,first)
+            await segment(f,"unfinished",text:"给我讲一个")
+            try require(f.audio.paused && f.audio.outputStops==0,"meaningful speech did not promptly pause playback")
+            // A committed stop must also preempt the timer if no start event arrived.
+            await f.wire.finishInput("stop","莉莉，停一下")
+            try require(users==["莉莉，停一下"] && f.call.state == .listening && f.audio.outputStops==1,"a stop waited for the continuation timer")
+            try await Task.sleep(nanoseconds:250_000_000)
+            try require(count(f.wire,"response.create")==1,"an earlier clause answered after the stop")
+        }),
+        ("VT-016 late earlier transcription supplies the missing context before a continuation is classified",{
+            let judge=TestVoiceIntent();judge.replies=[.listen,.listen]
+            let f=try await fixture(judge:judge,commitDelay:60_000_000);defer{close(f);judge.finish(.listen)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"first")
+            await segment(f,"second",text:"小马过河的故事。")
+            try require(judge.queries.isEmpty,"a noun-only continuation was classified without its earlier audio item")
+            f.wire.emit(["type":"conversation.item.input_audio_transcription.completed","item_id":"first","transcript":"给我讲一个"]);await settle()
+            try await waitFor({users.count==1},seconds:1)
+            try require(judge.queries.count==1 && judge.queries.last?.words=="小马过河的故事。" && judge.queries.last?.earlierInTurn=="给我讲一个","same-turn context was missing or presented as an unrelated previous request")
+            try require(users==["给我讲一个小马过河的故事。"],"the continued story request lost its second clause")
+        }),
+        ("VT-017 out-of-order ASR clauses create one actual chat bubble and a later turn stays separate",{
+            let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio()
+            let app=AppModel(store:store,keyProvider:{"fixture"},callFactory:{store,_,_,session in
+                RealtimeCall(store:store,wire:wire,audio:audio,permission:{true},session:session,inputCommitDelay:70_000_000)
+            });defer{app.cancel()}
+            app.toggleCall();await settle();wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+            let initialRequests=count(wire,"response.create")
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"a"]);await settle()
+            wire.emit(["type":"input_audio_buffer.speech_stopped","item_id":"a"]);await settle()
+            wire.emit(["type":"input_audio_buffer.committed","item_id":"a"]);await settle()
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"b"]);await settle()
+            await wire.finishInput("b","一个老巫婆的故事。")
+            wire.emit(["type":"conversation.item.input_audio_transcription.completed","item_id":"a","transcript":"我们来讲"]);await settle()
+            try await waitFor({app.messages.filter(\.isUser).count==1},seconds:1)
+            let message=app.messages.first{$0.isUser}
+            try require(message?.externalID=="a" && message?.text=="我们来讲一个老巫婆的故事。","ASR chunk IDs leaked into separate bubbles or changed their order")
+            try require(app.conversations.count==1 && count(wire,"response.create")==initialRequests+1,"one utterance created several conversations or replies")
+            await wire.finishInput("b","一个老巫婆的故事。")
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"next"]);await settle()
+            await wire.finishInput("next","接下来呢？")
+            try await waitFor({app.messages.filter(\.isUser).count==2},seconds:1)
+            try require(app.messages.filter(\.isUser).map(\.text)==["我们来讲一个老巫婆的故事。","接下来呢？"],"a duplicate or later utterance overwrote the first turn")
+        }),
+        ("VT-017 joining clauses preserves English word boundaries and Chinese punctuation",{
+            let f=try await fixture(commitDelay:60_000_000);defer{close(f)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"english-a",text:"I would like")
+            await segment(f,"english-b",text:"a story.")
+            try await waitFor({users.count==1},seconds:1)
+            try require(users==["I would like a story."],"English words were concatenated")
+            await segment(f,"chinese-a",text:"不是奶奶，")
+            await segment(f,"chinese-b",text:"是一个老巫婆。")
+            try await waitFor({users.count==2},seconds:1)
+            try require(users.last=="不是奶奶，是一个老巫婆。","joining rewrote or removed Chinese words and punctuation")
+        }),
+        ("VT-018 mute hangup and typed input cancel an unsubmitted spoken turn",{
+            for action in ["mute","hangup","text"] {
+                let f=try await fixture(commitDelay:100_000_000);defer{close(f)}
+                var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+                await segment(f,"pending",text:"我想听一个故事")
+                if action=="mute" {f.call.toggleMute()}
+                else if action=="hangup" {f.call.hangUp()}
+                else {try await f.call.sendText("改为讲小猫")}
+                try await Task.sleep(nanoseconds:150_000_000)
+                try require(users.isEmpty && count(f.wire,"response.create")==Int(action=="text" ? 1 : 0),"cancelled voice timer submitted an old turn")
+                if action=="mute" {
+                    f.call.toggleMute();await segment(f,"new",text:"现在讲小猫")
+                    try await waitFor({users.count==1},seconds:1)
+                    try require(users==["现在讲小猫"],"unmuting resurrected the cancelled clause")
+                }
+            }
+        }),
+        ("VT-018 a continued clause waits for its own late addressee decision",{
+            let judge=TestVoiceIntent();judge.replies=[.listen]
+            let f=try await fixture(judge:judge,commitDelay:70_000_000);defer{close(f);judge.finish(.keepSpeaking)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"real",text:"我想听个故事")
+            await segment(f,"side",text:"小明，你拿的是什么？")
+            try await Task.sleep(nanoseconds:100_000_000)
+            try require(users.isEmpty && count(f.wire,"response.create")==0,"the old timer bypassed a pending addressee decision")
+            judge.finish(.keepSpeaking)
+            try await waitFor({users.count==1},seconds:1)
+            try require(users==["我想听个故事"],"side speech was merged into the accepted turn")
+        }),
         ("VT-001 raw VAD leaves a spoken story and its visible speaking state intact",{
             let f=try await fixture();defer{close(f)}
             try await start(f,first+"\n\n"+second)
@@ -173,7 +343,7 @@ import Foundation
             try require(f.call.inputPackets==2 && f.call.inputPacketsWhileSpeaking==1 && count(f.wire,"input_audio_buffer.append")==2,"pausing speech paused the microphone")
             let session=f.wire.sent.first{$0["type"] as? String=="session.update"}?["session"] as? [String:Any]
             let transcription=((session?["audio"] as? [String:Any])?["input"] as? [String:Any])?["transcription"] as? [String:Any]
-            try require(transcription?["model"] as? String=="gpt-live-transcribe" && transcription?["delay"] as? String=="low","committed-only ASR returned")
+            try require(transcription?["model"] as? String=="gpt-live-transcribe" && transcription?["delay"] as? String=="medium","continuous preview or its accuracy setting changed")
         }),
         ("VT-011 contextual important sharing yields without requiring a command or question mark",{
             let judge=TestVoiceIntent();judge.replies=[.listen,.listen]
@@ -231,6 +401,58 @@ import Foundation
             await segment(f,"stop",text:"我说你先别讲了")
             let deletes=f.wire.sent.filter{$0["type"] as? String=="conversation.item.delete" && $0["item_id"] as? String=="ack"}
             try require(deletes.count==1 && f.call.active && f.call.state == .listening,"stop repeated an acknowledged deletion or ended the call")
+        }),
+        ("VT-013 side conversations are reviewed both during playback and while waiting",{
+            for playing in [false,true] {
+                let judge=TestVoiceIntent();judge.replies=[.keepSpeaking,.keepSpeaking]
+                let f=try await fixture(judge:judge);defer{close(f);judge.finish(.keepSpeaking)}
+                var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+                if playing {try await start(f,first+"你想听后面吗？")}
+                let before=count(f.wire,"response.create")
+                await segment(f,"family",text:"妈妈，你能帮我拿一下杯子吗？")
+                await segment(f,"other",text:"小明，作业写完了吗？")
+                try require(judge.queries.count==2 && users.isEmpty && count(f.wire,"response.create")==before,"a side question bypassed addressee review")
+                try require(f.audio.pauses==0 && f.audio.outputStops==0,"side speech interrupted playback")
+                let deleted=f.wire.sent.filter{$0["type"] as? String=="conversation.item.delete"}.compactMap{$0["item_id"] as? String}
+                try require(deleted.contains("family") && deleted.contains("other"),"rejected conversation remained in model context")
+                try require(f.call.state == (playing ? .speaking : .listening),"ignoring a bystander left the call thinking")
+            }
+        }),
+        ("VT-014 partial controls addressed to family do not preempt semantic review",{
+            let judge=TestVoiceIntent();judge.replies=[.keepSpeaking,.keepSpeaking]
+            let f=try await fixture(judge:judge);defer{close(f);judge.finish(.keepSpeaking)}
+            try await start(f,first)
+            f.wire.emit(["type":"input_audio_buffer.speech_started","item_id":"family"]);await settle()
+            f.wire.emit(["type":"conversation.item.input_audio_transcription.delta","item_id":"family","delta":"等一下，爸爸，帮我拿杯子"]);await settle()
+            try require(f.audio.pauses==0 && judge.queries.count==1,"a quoted or other-directed control used the stop fast path")
+            await f.wire.finishInput("family","等一下，爸爸，帮我拿杯子")
+            try require(f.audio.outputStops==0 && count(f.wire,"response.create")==1,"family direction cancelled the story")
+        }),
+        ("VT-014 family mentions role play and directly addressed requests remain conversational",{
+            for (speech,words) in [(first,"妈妈今天为什么很累"),("我们来演故事，我演妈妈，你演小兔。","妈妈，你为什么拿走我的苹果？")] {
+                let judge=TestVoiceIntent();judge.replies=[.listen]
+                let f=try await fixture(judge:judge);defer{close(f);judge.finish(.keepSpeaking)}
+                try await start(f,speech);await segment(f,"real-question",text:words)
+                try require(count(f.wire,"response.create")==2 && judge.queries.first?.assistantSpeech==speech,"family words were globally rejected or role-play context lost")
+            }
+            let judge=TestVoiceIntent()
+            let f=try await fixture(judge:judge);defer{close(f);judge.finish(.keepSpeaking)}
+            try await start(f,first);await segment(f,"direct",text:"莉莉，为什么会下雨？")
+            try require(count(f.wire,"response.create")==2 && judge.queries.isEmpty,"directly addressed question unnecessarily waited for a classifier")
+        }),
+        ("VT-015 failed or missing classification ignores only explicit household directions",{
+            for withJudge in [false,true] {
+                let judge=TestVoiceIntent()
+                let f=try await fixture(judge:withJudge ? judge : nil,intentTimeout:30_000_000);defer{close(f);judge.finish(.listen)}
+                try await start(f,first)
+                await segment(f,"side",text:"妈妈，你能不能帮我拿杯子")
+                if withJudge {try await waitFor({f.wire.sent.contains{$0["type"] as? String=="conversation.item.delete" && $0["item_id"] as? String=="side"}},seconds:1)}
+                judge.finish(.listen);await settle()
+                try require(f.audio.outputStops==0 && f.audio.pauses==0 && count(f.wire,"response.create")==1,"timeout or late judgment turned household speech into a reply")
+                await segment(f,"direct-stop",text:"莉莉，停一下")
+                try require(f.audio.outputStops==1 && f.call.state == .listening,"fallback blocked a real stop")
+            }
+            try require(VoiceTurnPolicy.fallbackIntent("妈妈今天为什么很累",context:.init(),final:true) == .listen,"a family mention was treated as a household command")
         }),
         ("VT-009 interruption retains fully heard paragraphs without inventing a word cursor",{
             let f=try await fixture();defer{close(f)}

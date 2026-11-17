@@ -165,7 +165,7 @@ struct PetQuickChat:View {
     var body:some View {
         VStack(alignment:.leading,spacing:14) {
             HStack(spacing:9) {UnicornPicture().frame(width:30,height:34);Text("莉莉").font(.system(size:21,weight:.semibold,design:.rounded));Spacer();Button(action:openHouse) {Image(systemName:"arrow.up.left.and.arrow.down.right").font(.system(size:17)).padding(7)}.buttonStyle(.plain).help("打开对话")}
-            Text(model.busy ? "莉莉在想…" : model.messages.last(where:{!$0.isUser && $0.source != "welcome"})?.text ?? (model.entryOrigin == .voice ? "莉莉在这里。" : "你好，想聊些什么？"))
+            Text(model.busy ? "莉莉在想…" : model.messages.last(where:{!$0.isUser && !$0.isRetracted && $0.source != "welcome"})?.text ?? (model.entryOrigin == .voice ? "莉莉在这里。" : "你好，想聊些什么？"))
                 .font(.system(size:18)).lineSpacing(5).lineLimit(4).frame(maxWidth:.infinity,minHeight:62,alignment:.topLeading)
             if let art = model.messages.last(where:{!$0.isUser})?.artwork, let image = NSImage(contentsOf:art.url) {
                 Button(action:openHouse) { Image(nsImage:image).resizable().scaledToFit().frame(maxHeight:160).clipShape(RoundedRectangle(cornerRadius:12)) }.buttonStyle(.plain).help("打开这幅画")
@@ -179,15 +179,18 @@ struct PetQuickChat:View {
             }.padding(12).toyCard(.white,.lilacEdge.opacity(0.5),radius:17)
             if model.inCall {
                 HStack(spacing:12) {
-                    Text(model.phone?.inputTranscript.isEmpty == false ? "你说："+model.phone!.inputTranscript : model.phone?.listeningHint.isEmpty == false ? model.phone!.listeningHint : model.callStatusTitle).font(.system(size:15,weight:.medium)).foregroundStyle(model.callVisualMode.color).lineLimit(2)
+                    Text(model.phone?.inputTranscript.isEmpty == false ? (model.phone!.inputPreviewIsFinal ? "你说：" : "暂时听到：")+model.phone!.inputTranscript : model.phone?.listeningHint.isEmpty == false ? model.phone!.listeningHint : model.callStatusTitle).font(.system(size:15,weight:.medium)).foregroundStyle(model.callVisualMode.color).lineLimit(2)
                     Spacer()
-                    Button {model.phone?.toggleMute()} label:{Label(model.phone?.muted == true ? "开麦" : "静音",systemImage:model.phone?.muted == true ? "mic.slash" : "mic").font(.system(size:15))}.buttonStyle(.plain)
+                    Button {model.phone?.toggleMute()} label:{Label(model.phone?.muted == true ? "开麦" : "静音",systemImage:model.phone?.muted == true ? "mic.slash" : "mic").font(.system(size:15))}.buttonStyle(.plain).disabled(model.isCorrectingVoice)
                 }.padding(.horizontal,4).padding(.vertical,6)
+                VoiceCallControls(model:model,compact:true)
             }
         }.padding(18).frame(width:420).frame(minHeight:330,alignment:.topLeading).background(Color.paper).foregroundStyle(Color.ink)
             .onAppear {inputFocused = !model.inCall}
             .onChange(of:model.inCall) {_,active in if active {inputFocused=false}}
             .onChange(of:model.draft) {_,text in if !text.isEmpty && !model.inCall {inputFocused=true}}
             .onChange(of:model.messages.last(where:{!$0.isUser})?.artwork?.id) {_,_ in DesktopPetController.shared.resizeQuickChat()}
+            .onChange(of:model.isCorrectingVoice) {_,_ in DesktopPetController.shared.resizeQuickChat()}
+            .onChange(of:model.phone?.latestVoiceInputID) {_,_ in DesktopPetController.shared.resizeQuickChat()}
     }
 }

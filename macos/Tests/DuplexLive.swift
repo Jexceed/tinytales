@@ -17,7 +17,16 @@ import Foundation
             ("爸爸，把窗户关上吧",.keepSpeaking,false,speech),
             ("我想去找妈妈",.listen,false,speech),
             ("好",.listen,true,"你想先听小兔的故事吗？"),
-            (speech,.keepSpeaking,false,speech)
+            (speech,.keepSpeaking,false,speech),
+            ("妈妈，你能帮我拿一下杯子吗？",.keepSpeaking,false,""),
+            ("小明，作业写完了吗？",.keepSpeaking,false,speech),
+            ("爸爸，你为什么拿我的杯子？",.keepSpeaking,true,"你想听下一段吗？"),
+            ("等一下，爸爸，帮我拿杯子",.keepSpeaking,false,speech),
+            ("妈妈今天为什么很累",.listen,false,speech),
+            ("莉莉，你为什么喜欢苹果",.listen,false,speech),
+            ("妈妈，你为什么拿走我的苹果",.listen,true,"我们来演故事，我演妈妈，你演小兔。你想问妈妈什么？"),
+            ("电视里说，停一下，广告马上回来",.keepSpeaking,false,speech),
+            ("我不是跟你说，我在跟爸爸说话",.keepSpeaking,false,speech)
         ]
         var results:[[String:Any]]=[]
         for (text,expected,expectsReply,current) in cases {
@@ -27,7 +36,7 @@ import Foundation
             print("Intent \(result==expected ? "PASS" : "FAIL"): \(text) -> \(result.rawValue)")
         }
         let success=results.allSatisfy{$0["passed"] as? Bool==true}
-        try JSONSerialization.data(withJSONObject:["success":success,"model":client.model,"syntheticOnly":true,"cases":results],options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:"artifacts/v013-duplex/intent-model-check.json"))
+        try JSONSerialization.data(withJSONObject:["success":success,"model":client.model,"syntheticOnly":true,"physicalMicrophoneOpened":false,"cases":results],options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:"/tmp/tinytales-address-intent.json"))
         if !success{exit(1)}
     }catch{print("Intent check failed: \(error.localizedDescription)");exit(1)}
 }
@@ -35,7 +44,8 @@ import Foundation
 @MainActor func duplexLive() async {
     let args=CommandLine.arguments
     let selected=args.firstIndex(of:"--case").flatMap{args.count>$0+1 ? args[$0+1] : nil}
-    let directory=URL(fileURLWithPath:"artifacts/v013-duplex",isDirectory:true)
+    let outputDirectory=args.firstIndex(of:"--output-dir").flatMap{args.count>$0+1 ? args[$0+1] : nil} ?? "/tmp/tinytales-duplex"
+    let directory=URL(fileURLWithPath:outputDirectory,isDirectory:true)
     do {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
         guard let key=Credentials.load(),let teacher=TeacherSpeechClient.discover(resources:URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("macos/Resources")) else{throw PartnerError.message("Saved connection or Mandarin runtime unavailable")}
@@ -58,7 +68,7 @@ import Foundation
             let store=try phoneFixture();defer{try? FileManager.default.removeItem(at:store.url.deletingLastPathComponent())}
             let wire=ObservedWire(key:key),audio=SilentCallAudio();audio.simulatePlayback=true
             let judge=OpenAIClient(key:key)
-            let call=RealtimeCall(store:store,wire:wire,audio:audio,voice:"teacher",teacherSpeech:teacher,intentJudge:judge)
+            let call=RealtimeCall(store:store,wire:wire,audio:audio,voice:"teacher",teacherSpeech:teacher,intentJudge:judge,finalRecognizer:judge)
             let started=Date();var phase="setup",targetItem:String?,commit:Double?,paused:Double?,yielded:Double?,firstTargetDelta:Double?,finalInput:Double?
             var users:[String]=[],replies:[String]=[],trace:[[String:Any]]=[],acknowledged=0,paragraphsFinished=0
             call.onUserText={_,text in users.append(text)}

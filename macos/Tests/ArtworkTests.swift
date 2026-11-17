@@ -43,7 +43,7 @@ let trainArtworkPlan: [String: Any] = ["ready":true,"sameStory":false,"title":"�
             for text in ["我说你画图吧，还是我要看一张图。","你画图吧","不要画小兔，画一辆红色小火车","画个小火车","生成一张图","我想看一张小火车的图片","把刚才的小火车画出来","我要看一张图"] {
                 try expect(StoryIntent.illustration(text),"missed request: " + text)
             }
-            for text in ["不要画图，继续讲","我喜欢画画","教我怎么画小兔","我们一起编一个故事，小兔画一张小地图。","给纸船再画个朋友，然后接着讲故事。","我想看图库里的《森林里的小种子》这张图片。"] {
+            for text in ["不要画图，继续讲","我喜欢画画","教我怎么画小兔","给我画一张图片这句话是什么意思？","我们一起编一个故事，小兔画一张小地图。","给纸船再画个朋友，然后接着讲故事。","我想看图库里的《森林里的小种子》这张图片。"] {
                 try expect(!StoryIntent.illustration(text),"false drawing request: " + text)
             }
         }),
@@ -86,6 +86,31 @@ let trainArtworkPlan: [String: Any] = ["ready":true,"sameStory":false,"title":"�
             do { _ = try await client.illustrate(IllustrationRequest(text:"画刚才那个",story:nil)); throw PartnerError.message("TEST: fabricated subject") }
             catch { try expect(!error.localizedDescription.contains("TEST:") && !error.localizedDescription.contains("保存"),"wrong clarification") }
             try expect(images == 0,"paid image request without subject")
+        }),
+        ("AI-002 an existing story gets one grounded planning recheck before asking for its subject again",{
+            let png=try artworkFixtureData();var plans=0,images=0
+            let client=OpenAIClient(key:"fixture",testTransport:{path,body in
+                if path=="images/generations" {images+=1;return ["data":[["b64_json":png.base64EncodedString()]]]}
+                if body["input"] is String {
+                    plans+=1
+                    if plans==1 {return try artworkResponse(["ready":false,"sameStory":false,"title":"","source":"","scene":""])}
+                    try expect((body["input"] as? String)?.contains("小火车") == true,"recheck lost its actual source")
+                    return try artworkResponse(trainArtworkPlan)
+                }
+                return try artworkResponse(["matches":true,"duplicated_character":false,"caption":"小火车在桥上。"])
+            })
+            _=try await client.illustrate(IllustrationRequest(text:"给我画一张图片",story:Story(title:"小火车",summary:"红色小火车走过一座石桥。")))
+            try expect(plans==2 && images==1,"grounded retry was missing or paid for a duplicate image")
+        }),
+        ("AI-003 an unresolved planning recheck remains bounded and never fabricates an image",{
+            var plans=0,images=0
+            let client=OpenAIClient(key:"fixture",testTransport:{path,_ in
+                if path=="images/generations"{images+=1};plans+=1
+                return try artworkResponse(["ready":false,"sameStory":false,"title":"","source":"","scene":""])
+            })
+            do {_=try await client.illustrate(IllustrationRequest(text:"画那个还没说清楚的东西",story:Story(title:"旧故事",summary:"小猫在树下。")));throw PartnerError.message("TEST: fabricated missing subject")}
+            catch{try expect(!error.localizedDescription.contains("TEST:"),"recheck forced an unsupported scene")}
+            try expect(plans==2 && images==0,"planning retries were unbounded or generated without a subject")
         }),
         ("AI-004 duplicate tool calls reuse the same generation and cancellation publishes nothing", {
             let store = try fixture(); defer { remove(store) }

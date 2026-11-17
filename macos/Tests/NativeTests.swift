@@ -97,6 +97,7 @@ func spriteAtlasFixture() throws -> URL {
         let artworkDirectory=FileManager.default.temporaryDirectory.appendingPathComponent("tinytales-test-artwork-"+UUID().uuidString)
         ArtworkArchive.directory=artworkDirectory
         defer {try? FileManager.default.removeItem(at:artworkDirectory)}
+        if CommandLine.arguments.contains("--classics-live") {await classicalKnowledgeLive();return}
         if CommandLine.arguments.contains("--artwork-eval") {await artworkComparisonLive();return}
         if CommandLine.arguments.contains("--teacher-live") {await teacherVoiceLive();return}
         if CommandLine.arguments.contains("--artwork-live") { await artworkLive(); return }
@@ -840,6 +841,9 @@ func spriteAtlasFixture() throws -> URL {
         cases += petBehaviorTestCases()
         cases += artworkTestCases()
         cases += conversationDeletionTestCases()
+        cases += conversationLabelsTestCases()
+        cases += backgroundConversationTestCases()
+        cases += classicalKnowledgeTestCases()
         for (name, test) in cases { do { try await test(); print("PASS \(name)") } catch { failed += 1; print("FAIL \(name): \(error.localizedDescription)") } }
         print("Native tests: \(cases.count - failed)/\(cases.count) passed")
         if failed > 0 { exit(1) }

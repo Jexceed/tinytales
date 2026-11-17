@@ -20,15 +20,19 @@ for path in files:
                 errors.append(f"{path.relative_to(ROOT)}: missing link {target}")
 
 mapped = 0
-for feature, test_file, prefix, suite, registration in [
-    ("001-natural-voice-turns", "NaturalTurnTests.swift", "VT", "PhoneTests.swift", "naturalTurnTestCases()"),
-    ("005-conversation-deletion", "ConversationDeletionTests.swift", "CD", "NativeTests.swift", "conversationDeletionTestCases()"),
-    ("004-conversation-artwork", "ArtworkTests.swift", "AI", "NativeTests.swift", "artworkTestCases()"),
-    ("002-lily-pet-behaviors", "PetBehaviorTests.swift", "PB", "NativeTests.swift", "petBehaviorTestCases()"),
+for feature, prefix, suites in [
+    ("001-natural-voice-turns", "VT", [("NaturalTurnTests.swift", "PhoneTests.swift", "naturalTurnTestCases()")]),
+    ("007-voice-reliability", "VR", [("VoiceReliabilityTests.swift", "PhoneTests.swift", "voiceReliabilityTestCases()")]),
+    ("005-conversation-deletion", "CD", [("ConversationDeletionTests.swift", "NativeTests.swift", "conversationDeletionTestCases()")]),
+    ("008-conversation-labels", "CL", [("ConversationLabelsTests.swift", "NativeTests.swift", "conversationLabelsTestCases()"), ("ConversationLabelsPhoneTests.swift", "PhoneTests.swift", "conversationLabelsPhoneTestCases()")]),
+    ("009-background-conversations", "BG", [("BackgroundConversationTests.swift", "NativeTests.swift", "backgroundConversationTestCases()"), ("BackgroundConversationPhoneTests.swift", "PhoneTests.swift", "backgroundConversationPhoneTestCases()")]),
+    ("004-conversation-artwork", "AI", [("ArtworkTests.swift", "NativeTests.swift", "artworkTestCases()")]),
+    ("002-lily-pet-behaviors", "PB", [("PetBehaviorTests.swift", "NativeTests.swift", "petBehaviorTestCases()")]),
+    ("006-classical-knowledge", "CK", [("ClassicalKnowledgeTests.swift", "NativeTests.swift", "classicalKnowledgeTestCases()"), ("ClassicalKnowledgePhoneTests.swift", "PhoneTests.swift", "classicalKnowledgePhoneTestCases()")]),
 ]:
     spec = ROOT / f"specs/{feature}/spec.md"
     required = set(re.findall(rf"^\| ({prefix}-\d{{3}}) \|", spec.read_text(), re.MULTILINE))
-    tests = (ROOT / f"macos/Tests/{test_file}").read_text()
+    tests = "\n".join((ROOT / f"macos/Tests/{test_file}").read_text() for test_file, _, _ in suites)
     covered = set(re.findall(rf'\("({prefix}-\d{{3}}) ', tests))
     if not required:
         errors.append(f"{feature}: specification has no acceptance IDs")
@@ -36,10 +40,11 @@ for feature, test_file, prefix, suite, registration in [
         errors.append(f"{identity}: missing named regression case")
     for identity in sorted(covered - required):
         errors.append(f"{identity}: test is not described by the current specification")
-    if registration not in (ROOT / f"macos/Tests/{suite}").read_text():
-        errors.append(f"{test_file}: not registered in {suite}")
-    if test_file not in (ROOT / "scripts/macos.mjs").read_text():
-        errors.append(f"{test_file}: not compiled by the build script")
+    for test_file, suite, registration in suites:
+        if registration not in (ROOT / f"macos/Tests/{suite}").read_text():
+            errors.append(f"{test_file}: not registered in {suite}")
+        if test_file not in (ROOT / "scripts/macos.mjs").read_text():
+            errors.append(f"{test_file}: not compiled by the build script")
     mapped += len(required)
 if errors:
     raise SystemExit("\n".join(errors))

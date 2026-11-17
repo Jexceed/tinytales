@@ -109,6 +109,8 @@ import AppKit
     var onError:((String)->Void)?
     private var closed=true
     private let sample:String
+    private var inputSubmitted=false
+    private var previewResponses=0
     init(sample:String="") {self.sample=sample}
     func connect() {
         closed=false
@@ -119,6 +121,12 @@ import AppKit
     }
     func send(_ event:[String:Any]) async throws {
         guard !closed else {return}
+        if event["type"] as? String=="response.create",sample=="correction",inputSubmitted {
+            previewResponses+=1;let id="preview-response-\(previewResponses)"
+            onEvent?(["type":"response.created","response":["id":id]])
+            onEvent?(["type":"response.output_text.delta","response_id":id,"item_id":id+"-text","delta":"好呀，我们再来一个成语故事。"])
+            return
+        }
         if event["type"] as? String=="response.create",sample=="drawing" {
             guard let response=event["response"] as? [String:Any],response["tool_choice"] != nil else{return}
             onEvent?(["type":"response.created","response":["id":"drawing-preview"]])
@@ -142,6 +150,11 @@ import AppKit
                 guard !self.closed else{return}
                 if self.sample=="partial" {
                     self.onEvent?(["type":"conversation.item.input_audio_transcription.delta","item_id":"preview-user","delta":"给我讲个故事"])
+                } else if self.sample=="correction" {
+                    self.inputSubmitted=true
+                    self.onEvent?(["type":"input_audio_buffer.speech_stopped","item_id":"preview-user"])
+                    self.onEvent?(["type":"input_audio_buffer.committed","item_id":"preview-user"])
+                    self.onEvent?(["type":"conversation.item.input_audio_transcription.completed","item_id":"preview-user","transcript":"今天画上的故事"])
                 } else {
                     self.onEvent?(["type":"input_audio_buffer.speech_stopped","item_id":"preview-user"])
                     self.onEvent?(["type":"input_audio_buffer.committed","item_id":"preview-user"])
