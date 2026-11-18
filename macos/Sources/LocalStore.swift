@@ -46,14 +46,26 @@ final class LocalStore {
     func setSettings(_ settings: PartnerSettings) throws {
         let old = try self.settings()
         try write("settings", id: "main", value: settings)
-        if old.memoryEnabled != settings.memoryEnabled || old.english != settings.english || old.sessionMinutes != settings.sessionMinutes { revision += 1 }
+        if old.memoryEnabled != settings.memoryEnabled || old.english != settings.english { revision += 1 }
     }
-    func remember(_ memory: Memory) throws {
+    enum MemorySlot: String { case available, duplicate = "already_recorded", full = "memory_full" }
+    func memorySlot(for memory: Memory, including staged: [Memory] = []) throws -> MemorySlot {
+        let existing = try memories() + staged
+        if existing.contains(where: { $0.text == memory.text && $0.id != memory.id }) { return .duplicate }
+        if existing.count >= 60 && !existing.contains(where: { $0.id == memory.id }) { return .full }
+        return .available
+    }
+    @discardableResult func remember(_ memory: Memory, skipIfFull: Bool = false) throws -> Bool {
         guard Safety.mayRemember(memory.text), Safety.mayRemember(memory.evidence), ["interest", "word", "english"].contains(memory.kind), ["pending", "approved"].contains(memory.status) else { throw PartnerError.message("请只保存非隐私的兴趣与词汇，不保存身份信息或能力判断。") }
-        let existing = try memories()
-        if existing.contains(where: { $0.text == memory.text && $0.id != memory.id }) { return }
-        guard existing.count < 60 || existing.contains(where: { $0.id == memory.id }) else { throw PartnerError.message("记忆小花园已经满了，请先整理一下。") }
-        try write("memories", id: memory.id, value: memory)
+        switch try memorySlot(for: memory) {
+        case .duplicate: return false
+        case .full:
+            if skipIfFull { return false }
+            throw PartnerError.message("记忆小花园已经满了，请先整理一下。")
+        case .available:
+            try write("memories", id: memory.id, value: memory)
+            return true
+        }
     }
     func editMemory(_ memory: Memory) throws { try remember(memory); revision += 1 }
     func saveStory(_ story: Story) throws {

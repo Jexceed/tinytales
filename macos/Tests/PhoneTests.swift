@@ -108,6 +108,9 @@ func wav(_ pcm: Data) -> Data {
         if CommandLine.arguments.contains("--recognition-regression-live") {await recognitionRegressionLive();return}
         if CommandLine.arguments.contains("--voice-scenarios-live") {await voiceScenariosLive();return}
         if CommandLine.arguments.contains("--artwork-live") {await artworkPhoneLive();return}
+        if CommandLine.arguments.contains("--gallery-tools-live") {
+            await galleryToolPhoneLive(reportURL:URL(fileURLWithPath:"/tmp/tinytales-gallery-tools-live.json")); return
+        }
         if CommandLine.arguments.contains("--voice-intent-live") {await voiceIntentLive();return}
         if CommandLine.arguments.contains("--duplex-live") || CommandLine.arguments.contains("--turns-live") {await duplexLive();return}
         if CommandLine.arguments.contains("--voice-eval") {await voiceRecognitionEvaluation();return}
@@ -490,7 +493,7 @@ func wav(_ pcm: Data) -> Data {
                 try await Task.sleep(nanoseconds:100_000_000)
                 try require(wire.sent.filter{$0["type"] as? String == "response.create"}.count == before,"old tool resumed in the new turn")
             })
-        ] + voiceTurnTestCases() + teacherSpeechTestCases() + naturalTurnTestCases() + classicalKnowledgePhoneTestCases() + voiceReliabilityTestCases() + conversationLabelsPhoneTestCases() + backgroundConversationPhoneTestCases()
+        ] + voiceTurnTestCases() + teacherSpeechTestCases() + naturalTurnTestCases() + classicalKnowledgePhoneTestCases() + voiceReliabilityTestCases() + conversationLabelsPhoneTestCases() + backgroundConversationPhoneTestCases() + conversationToolPhoneTestCases()
         for (name,test) in cases { do {try await test();passed += 1;print("PASS phone \(name)")}catch{print("FAIL phone \(name): \(error.localizedDescription)")} }
         print("Phone tests: \(passed)/\(cases.count) passed");if passed != cases.count {exit(1)}
     }

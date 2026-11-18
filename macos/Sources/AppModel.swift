@@ -50,6 +50,7 @@ import Combine
     @Published var cloudAvailable = false
     @Published var operations = 0
     @Published private(set) var phone: RealtimeCall?
+    @Published private var startingCall = false
     let voice = NativeVoice()
     private var teacherSpeech:TeacherSpeechClient?
     let store: LocalStore
@@ -86,8 +87,10 @@ import Combine
     }
     private func enterTextConversation() {browsing=false;entryOrigin = .text;openingConsumed=true}
     var pendingCount: Int { memories.filter { $0.status == "pending" }.count }
-    var inCall: Bool { phone?.active == true }
+    var inCall: Bool { startingCall || phone?.active == true }
+    var connectingCall: Bool { startingCall || phone?.state == .connecting }
     var callCaption: String {
+        if connectingCall { return "正在接通…" }
         guard let phone, phone.active else { return "打个电话，直接聊聊" }
         if phone.muted { return "麦克风已静音" }
         switch phone.state { case .connecting: return "正在接通…"; case .listening: return "已接通，想说什么就说吧"; case .thinking: return "莉莉正在想一想…"; case .speaking: return "莉莉正在说，你也可以接话"; case .ended: return "通话已结束" }
@@ -105,7 +108,11 @@ import Combine
         catch { self.error = error.localizedDescription }
     }
     private var history: [[String: Any]] {
-        Array(messages.filter { $0.source != "welcome" && !$0.text.isEmpty && $0.text != "…" && !$0.isStreaming && !$0.isRetracted && !$0.isInterrupted }.suffix(12)).map { ["role": $0.isUser ? "user" : "assistant", "content": $0.text] }
+        messages.filter { message in
+            message.source != "welcome" && !message.text.isEmpty && message.text != "…" &&
+            !message.isStreaming && !message.isRetracted && !message.isInterrupted &&
+            !(message.isUser && Safety.shouldProtectUserInput(message.text))
+        }.suffix(12).map { ["role": $0.isUser ? "user" : "assistant", "content": $0.text] }
     }
     private func rememberSidebarPositions() {
         let archiveIDs=stories.map{"archive:"+$0.id}
@@ -166,7 +173,7 @@ import Combine
     }
     private func nameConversation(from text:String) {
         let clean=text.trimmingCharacters(in:.whitespacesAndNewlines)
-        guard ConversationLabels.isPlaceholder(conversationTitle), !clean.isEmpty, !Safety.isPrivate(clean) else{return}
+        guard ConversationLabels.isPlaceholder(conversationTitle), !clean.isEmpty, !Safety.isPrivate(clean), !Safety.shouldProtectUserInput(clean) else{return}
         conversationTitle=OpeningPrompt.allCases.first{$0.text == clean}?.title ?? String(clean.components(separatedBy:.newlines).first!.prefix(20))
     }
     func recordUserMessageSent(_ text:String,isVoice:Bool=false) {
@@ -308,6 +315,7 @@ import Combine
     func cancelStory() { choosingStory = false; draft = priorStoryDraft; browsing = priorBrowsing; selectedStarter = nil; storyDirection = "" }
 
     private func stopVoiceForNavigation() {
+        startingCall = false
         voiceControlWork?.cancel();voiceControlWork=nil;isCorrectingVoice=false;voiceCorrectionText=""
         voiceConversationStates=[:]
         voice.cancelRecording();voice.stopSpeaking()
@@ -328,6 +336,10 @@ import Combine
         let text = (given ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy, !text.isEmpty else { return }
         guard text.count <= 600 else { error = "这一段有点长，请分成几句慢慢说。"; return }
+        if connectingCall {
+            if draft.isEmpty { draft = text }
+            return
+        }
         let startingStory = choosingStory
         let request:String
         if startingStory, let selectedStarter, text == selectedStarter.title || text == selectedStarter.title + " · " + storyDirection {
@@ -341,7 +353,18 @@ import Combine
         recordUserMessageSent(text)
         if inCall, let phone {
             choosingStory = false; draft = ""; error = ""; messages.append(ChatMessage(isUser: true, text: text))
-            Task { do { try await phone.sendText(request, newStory: startingStory) } catch { if !(error is CancellationError) {self.error = error.localizedDescription} } }
+            if Safety.shouldProtectUserInput(request) {
+                messages.append(ChatMessage(isUser:false, text:Safety.privateReply, source:"safety"))
+                return
+            }
+            Task {
+                do { try await phone.sendText(request, newStory:startingStory) }
+                catch {
+                    guard self.phone === phone, !(error is CancellationError) else { return }
+                    self.error = error.localizedDescription
+                    if self.draft.isEmpty { self.draft = text }
+                }
+            }
             return
         }
         voice.stopSpeaking(); error = ""; draft = ""; busy = true; activity = "莉莉在认真听"
@@ -396,7 +419,7 @@ import Combine
         }
     }
     func toggleCall() {
-        if inCall { callWork?.cancel(); phone?.hangUp(); return }
+        if inCall { startingCall = false; callWork?.cancel(); phone?.hangUp(); return }
         voiceConversationStates=[:]
         enterVoiceConversation()
         guard let key = connectionKey else { error = "先连接故事伙伴，之后点一次电话就能持续交流。"; showParent = true; return }
@@ -466,7 +489,16 @@ import Combine
             if let notice = call?.notice, !notice.isEmpty { self.error = notice }
         }
         let prior = history
-        callWork = Task { do { try await call.connect(history: prior) } catch { if !(error is CancellationError) { self.error = error.localizedDescription }; call.hangUp() } }
+        startingCall = true
+        callWork = Task {
+            guard !Task.isCancelled, self.phone === call else { return }
+            defer { if self.phone === call { self.startingCall = false } }
+            do { try await call.connect(history:prior) }
+            catch {
+                guard self.phone === call, !(error is CancellationError) else { return }
+                self.error = error.localizedDescription; call.hangUp()
+            }
+        }
     }
     func stopVoiceTurn() {
         guard let phone,inCall else{voice.stopSpeaking();return}
@@ -517,7 +549,7 @@ import Combine
     }
     func updateSettings(_ value: PartnerSettings) {
         do {
-            let reset = settings.memoryEnabled != value.memoryEnabled || settings.english != value.english || settings.sessionMinutes != value.sessionMinutes
+            let reset = settings.memoryEnabled != value.memoryEnabled || settings.english != value.english
             let voiceChanged = settings.voiceBackend != value.voiceBackend || settings.speaks != value.speaks || settings.voiceStyle != value.voiceStyle
             try store.setSettings(value); settings = value
             if reset { newConversation(forgettingHistory:true) }

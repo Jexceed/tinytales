@@ -274,7 +274,7 @@ struct NativeComposer: View {
                 TextField("写给莉莉…", text: $model.draft, axis: .vertical).textFieldStyle(.plain).font(.system(size: 18, design: .rounded)).lineLimit(1...3).focused($inputFocused).onSubmit { model.send() }.disabled(model.busy)
                 if voice.speaking || voice.preparing { Button { voice.stopSpeaking() } label: { Label("停一下", systemImage: "speaker.slash.fill").font(.system(size: 17, weight: .medium)) }.buttonStyle(.plain) }
                 if model.busy { Button("停一下") { model.cancel() }.font(.system(size: 18, weight: .semibold)).buttonStyle(.bordered) }
-                else if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Button { model.send() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .bold)).foregroundStyle(.white).frame(width: 48, height: 48).background(Color.sage, in: Circle()) }.buttonStyle(.plain).help("发送") }
+                else if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Button { model.send() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .bold)).foregroundStyle(.white).frame(width: 48, height: 48).background(Color.sage, in: Circle()) }.buttonStyle(.plain).disabled(model.connectingCall).help(model.connectingCall ? "接通后发送" : "发送") }
                 PhoneButton(model: model)
             }.padding(12).toyCard(.white, .lilacEdge.opacity(0.5), radius: 19)
         }.onAppear {inputFocused = !model.inCall}

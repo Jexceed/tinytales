@@ -29,6 +29,7 @@ for feature, prefix, suites in [
     ("004-conversation-artwork", "AI", [("ArtworkTests.swift", "NativeTests.swift", "artworkTestCases()")]),
     ("002-lily-pet-behaviors", "PB", [("PetBehaviorTests.swift", "NativeTests.swift", "petBehaviorTestCases()")]),
     ("006-classical-knowledge", "CK", [("ClassicalKnowledgeTests.swift", "NativeTests.swift", "classicalKnowledgeTestCases()"), ("ClassicalKnowledgePhoneTests.swift", "PhoneTests.swift", "classicalKnowledgePhoneTestCases()")]),
+    ("010-conversation-tools", "TL", [("ConversationToolTests.swift", "NativeTests.swift", "conversationToolTestCases()"), ("ConversationToolPhoneTests.swift", "PhoneTests.swift", "conversationToolPhoneTestCases()")]),
 ]:
     spec = ROOT / f"specs/{feature}/spec.md"
     required = set(re.findall(rf"^\| ({prefix}-\d{{3}}) \|", spec.read_text(), re.MULTILINE))

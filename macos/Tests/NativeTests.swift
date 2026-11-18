@@ -6,6 +6,8 @@ class FakeModel: PartnerModel {
     var outputs: [ModelOutput]
     var inputs: [[[String: Any]]] = []
     var prompts: [String] = []
+    var toolNames: [[String]] = []
+    var toolPermissions: [Bool] = []
     var moderation: (String) -> Bool = { _ in true }
     var assessment: (String, SafetyReviewScope) -> SafetyDecision = { _, _ in .redirect }
     var assessments: [(String, SafetyReviewScope)] = []
@@ -20,6 +22,8 @@ class FakeModel: PartnerModel {
     }
     func respond(input: [[String: Any]], instructions: String, tools: [[String: Any]], allowTools: Bool) async throws -> ModelOutput {
         inputs.append(input); prompts.append(instructions)
+        toolNames.append(tools.compactMap { $0["name"] as? String })
+        toolPermissions.append(allowTools)
         if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         guard !outputs.isEmpty else { throw PartnerError.message("Fake output exhausted") }
         return outputs.removeFirst()
@@ -552,9 +556,10 @@ func spriteAtlasFixture() throws -> URL {
                 let store = try fixture(); defer { remove(store) }; let fake = FakeModel(); let engine = CompanionEngine(store: store, model: fake)
                 let r = try await engine.turn("我的学校是虚构测试幼儿园"); try expect(r.source == "safety", "private text not stopped"); try expect(fake.inputs.isEmpty, "private text reached model")
             }),
-            ("fabricated memory evidence is rejected", {
+            ("TL-001 fabricated memory evidence is rejected while the reply continues", {
                 let store = try fixture(); defer { remove(store) }; let fake = FakeModel([tools([call("propose_memory", ["kind": "interest", "text": "喜欢企鹅", "evidence": "我喜欢企鹅"])]), finish()]); let engine = CompanionEngine(store: store, model: fake)
-                do { _ = try await engine.turn("一只小恐龙在散步"); throw PartnerError.message("TEST: false evidence accepted") } catch { try expect(!error.localizedDescription.contains("TEST:"), "invented evidence accepted") }
+                let reply = try await engine.turn("一只小恐龙在散步")
+                try expect(reply.source == "cloud" && reply.activities.isEmpty && (try jsonString(fake.inputs.last ?? [])).contains("invalid_memory_evidence"), "invented evidence was accepted or stopped the reply")
                 try expect(try store.memories().isEmpty, "invented evidence saved")
             }),
             ("disabled memory is neither recalled nor proposed", {
@@ -844,6 +849,7 @@ func spriteAtlasFixture() throws -> URL {
         cases += conversationLabelsTestCases()
         cases += backgroundConversationTestCases()
         cases += classicalKnowledgeTestCases()
+        cases += conversationToolTestCases()
         for (name, test) in cases { do { try await test(); print("PASS \(name)") } catch { failed += 1; print("FAIL \(name): \(error.localizedDescription)") } }
         print("Native tests: \(cases.count - failed)/\(cases.count) passed")
         if failed > 0 { exit(1) }

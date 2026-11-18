@@ -11,6 +11,33 @@ import SQLite3
         app.newConversation(forgettingHistory:true);model.releaseAll();remove(store)
     }
     return [
+        ("BG-008 changing the duration preserves background work and visible drafts", {
+            let (store,model,app) = try setup(); defer { cleanup(store,model,app) }
+            app.send("一起聊贝壳"); let original = app.selectedConversationID
+            try await backgroundWait { model.requests.count == 1 }
+            app.newConversation(); let blank = app.selectedConversationID
+            app.draft = "等会儿聊小猫"
+            var settings = app.settings; settings.sessionMinutes = 15; app.updateSettings(settings)
+            try expect(app.selectedConversationID == blank && app.draft == "等会儿聊小猫" && app.conversations.first { $0.id == original }?.isGenerating == true, "duration edit cleared work or the visible draft")
+            model.finish(0, "小海獭捡到贝壳。")
+            try await backgroundWait { app.conversations.first { $0.id == original }?.hasUnreadReply == true }
+        }),
+        ("BG-008 a running clock keeps its deadline and the next one uses the new duration", {
+            let store = try fixture(); defer { remove(store) }
+            var time = Date(), settings = try store.settings()
+            settings.sessionMinutes = 5; try store.setSettings(settings)
+            let fake = FakeModel([finish("你好。"),finish("你好呀。"),finish("接着聊。")])
+            let old = CompanionEngine(store:store,model:fake,now:{time})
+            _ = try await old.turn("你好")
+            settings.sessionMinutes = 15; try store.setSettings(settings)
+            let fresh = CompanionEngine(store:store,model:fake,now:{time})
+            _ = try await fresh.turn("新话题")
+            time = time.addingTimeInterval(301)
+            do { _ = try await old.turn("再聊聊"); throw PartnerError.message("TEST: original deadline extended") }
+            catch { try expect(!error.localizedDescription.hasPrefix("TEST:"), "old timer ignored its cutoff") }
+            _ = try await fresh.turn("接着聊")
+            try expect(fake.inputs.count == 3, "new duration did not apply to the next conversation")
+        }),
         ("BG-001 switching and new conversation retain a single live stream and its final reply", {
             let (store,model,app)=try setup();defer{cleanup(store,model,app)}
             let archive=Story(title:"海湾贝壳",summary:"海獭在海湾里找到贝壳。")

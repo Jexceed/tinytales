@@ -174,7 +174,7 @@ struct PetQuickChat:View {
             if !model.error.isEmpty {Text(model.error).font(.system(size:14)).foregroundStyle(.orange).lineLimit(2)}
             HStack(spacing:10) {
                 TextField("写给莉莉…",text:$model.draft,axis:.vertical).textFieldStyle(.plain).font(.system(size:17)).lineLimit(1...3).focused($inputFocused).onSubmit{model.send()}.disabled(model.busy)
-                if !model.draft.isEmpty {Button {model.send()} label:{Image(systemName:"arrow.up.circle.fill").font(.system(size:29))}.buttonStyle(.plain).disabled(model.busy)}
+                if !model.draft.isEmpty {Button {model.send()} label:{Image(systemName:"arrow.up.circle.fill").font(.system(size:29))}.buttonStyle(.plain).disabled(model.busy || model.connectingCall).help(model.connectingCall ? "接通后发送" : "发送")}
                 PhoneButton(model:model,compact:true)
             }.padding(12).toyCard(.white,.lilacEdge.opacity(0.5),radius:17)
             if model.inCall {

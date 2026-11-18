@@ -2,6 +2,24 @@ import Foundation
 
 @MainActor func classicalKnowledgeTestCases()->[(String,@MainActor () async throws -> Void)] {
     [
+        ("CK-006 a quoted title matches a complete work even alongside a known author or verse", {
+            let unknown = "请背李白的《靜夜思續篇》，里面有床前明月光吗？"
+            try expect(ClassicalKnowledge.search(unknown).isEmpty && ClassicalKnowledge.exactMatches(unknown).isEmpty, "an uncollected title inherited another poem")
+            let reference = try ClassicalKnowledge.reference(for:unknown)
+            try expect(reference.contains("not_in_curated_library") && !reference.contains("poem-jing-ye-si"), "automatic prompt attributed original text to another work")
+            let mixed = "《靜夜思》和《小池边的风》都是古诗吗？"
+            try expect(ClassicalKnowledge.contextMatches(mixed).map(\.id) == ["poem-jing-ye-si"] && (try ClassicalKnowledge.reference(for:mixed)).contains("小池边的风"), "mixed titles were silently conflated")
+            try expect(ClassicalKnowledge.search("请背《草》").first?.author == "白居易" && (try ClassicalKnowledge.reference(for:"我们编个《小池边的风》的故事")).isEmpty, "a short alias or ordinary fictional title was misread")
+        }),
+        ("CK-006 a model lookup cannot shorten the user's uncollected title into a different poem", {
+            let store = try fixture(); defer { remove(store) }
+            let model = FakeModel([tools([call("lookup_classics",["query":"静夜思续篇","kind":"poem"]),call("lookup_classics",["query":"静夜思","kind":"poem"])]),modern("资料本还没收录《静夜思续篇》。",narrative:false)])
+            _ = try await CompanionEngine(store:store,model:model).turn("请背《静夜思续篇》，我问的是这个完整篇名。")
+            let outputs = model.inputs[1].compactMap { $0["output"] as? String }
+            try expect(outputs.count == 2 && outputs.allSatisfy { $0.contains("not_in_curated_library") && $0.contains("静夜思续篇") && !$0.contains("床前明月光") }, "model-rewritten query returned the wrong poem")
+            try expect(ClassicalKnowledge.lookupQuery("春天",requestedIn:"《静夜思》之外有哪些春天的诗？") == "春天", "an independent topic was forced into the previous title")
+            try expect(ClassicalKnowledge.lookupQuery("静夜思续篇",requestedIn:"《静夜思》和《静夜思续篇》") == "《静夜思续篇》", "an exact follow-up returned both overlapping titles")
+        }),
         ("CK-005 similar spoken poem is an uncertain candidate and never a replacement character",{
             let reference=try ClassicalKnowledge.reference(for:"我说的是许头望明月")
             try expect(reference.contains("possible_misheard_quote") && reference.contains("举头望明月"),"a likely misheard poem had no confirmation reference")
@@ -113,7 +131,8 @@ final class ClassicalLiveModel:StreamingPartnerModel,ContentQualityReviewingMode
             ("讲一个关于植物的成语，先查你准备好的资料，不改编。",{text,activities in text.contains("苗助长") && (activities.contains{$0.contains("资料本")} || observed.prompts.contains{$0.contains("idiom-ya-miao-zhu-zhang")})}),
             ("你收录了《星星擦月亮》这首古诗吗？能给我背原文吗？",{text,_ in text.range(of:"没有|没收录|未收录|没找到|没查到|没有核对|还没",options:.regularExpression) != nil}),
             ("我说的是许头望明月。",{text,_ in text.contains("举头望明月") && text.contains("静夜思") && text.range(of:"吗|是不是|是否|是指",options:.regularExpression) != nil}),
-            ("一是地上霜。",{text,_ in text.contains("疑是地上霜") && text.contains("静夜思") && text.range(of:"吗|是不是|是否|是指",options:.regularExpression) != nil})
+            ("一是地上霜。",{text,_ in text.contains("疑是地上霜") && text.contains("静夜思") && text.range(of:"吗|是不是|是否|是指",options:.regularExpression) != nil}),
+            ("请背《静夜思续篇》，我问的是这个完整篇名。",{text,_ in !text.contains("床前明月光") && text.range(of:"没.{0,8}(?:收录|收进|找到|核对|查到)|未收录|还没",options:.regularExpression) != nil})
         ]
         var records:[[String:Any]]=[]
         let selected=CommandLine.arguments.firstIndex(of:"--classics-case").flatMap { index in CommandLine.arguments.count>index+1 ? Int(CommandLine.arguments[index+1]) : nil }

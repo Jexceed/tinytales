@@ -13,6 +13,34 @@ let trainArtworkPlan: [String: Any] = ["ready":true,"sameStory":false,"title":"�
 
 @MainActor func artworkTestCases() -> [(String, @MainActor () async throws -> Void)] {
     [
+        ("AI-009 declining pictures or discussing drawing never opens an image even on a tool call", {
+            let store = try fixture(); defer { remove(store) }
+            for text in ["不想看图库里的《一颗种子的愿望》了，聊聊种子吧。","你会画画吗？","给我画一张图片这句话是什么意思？","先别给我看图。","画一只狐狸，算了不画了。","什么是插画？"] {
+                let model = FakeIllustrator([tools([call("show_picture",["id":"seed"]),call("illustrate_story")]),finish("我们一起聊聊吧。")])
+                var reads = 0
+                let reply = try await CompanionEngine(store:store,model:model,image:{ _ in reads += 1; return Data([1]) }).turn(text)
+                try expect(reply.sceneID == nil && reply.artwork == nil && reads == 0 && model.illustrationRequests.isEmpty, "requested no image: " + text)
+            }
+        }),
+        ("AI-009 observing a familiar library subject uses the actual picture and answers the question", {
+            let store = try fixture(); defer { remove(store) }
+            let model = FakeIllustrator([modern("小兔撑着伞，小刺猬站在它旁边。",narrative:false)])
+            let engine = CompanionEngine(store:store,model:model,image:{ _ in Data([1]) })
+            let reply = try await engine.turn("我想看看下雨的画，告诉我画里的小动物正在做什么。")
+            try expect(reply.sceneID == "rain" && reply.reply.reply == "小兔撑着伞，小刺猬站在它旁边。" && model.illustrationRequests.isEmpty, "picture observation ran generation or discarded the answer")
+            try expect(StoryIntent.illustration("请画一张下雨的画，告诉我画里的小动物在做什么。"), "an explicit drawing request fell back to the gallery")
+        }),
+        ("AI-009 a replacement selects the requested gallery work or the new drawing", {
+            let store = try fixture(); defer { remove(store) }
+            let model = FakeIllustrator([tools([call("illustrate_story")]),finish("我看到了小熊。")])
+            let engine = CompanionEngine(store:store,model:model,image:{ _ in Data([1]) })
+            let reply = try await engine.turn("不看《朋友共用一把伞》这幅图了，打开图库里的《一颗种子的愿望》。")
+            try expect(reply.sceneID == "seed" && reply.artwork == nil && model.illustrationRequests.isEmpty, "substituted an unrequested picture")
+            let drawn = try await engine.turn("不要看图库里的《一颗种子的愿望》，请给我画一只小狐狸。")
+            guard let art = drawn.artwork else { throw PartnerError.message("TEST: correction to new drawing was lost") }
+            defer { ArtworkArchive.remove(art) }
+            try expect(drawn.sceneID == nil && model.illustrationRequests.count == 1, "a declined gallery overrode the new request")
+        }),
         ("AI-008 first drawing still works after welcome idle time and invalid empty input", {
             let store=try fixture();defer{remove(store)}
             var clock=Date(timeIntervalSince1970:1000)

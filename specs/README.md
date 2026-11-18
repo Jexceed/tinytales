@@ -1,6 +1,7 @@
 # 当前规格
 
 - [产品基线](product.md)：跨版本保留的产品决定与约束。
+- [对话工具与设置](010-conversation-tools/spec.md)记录记忆、词卡、故事、配图及跨入口历史的执行约束。
 - [双工倾听与自然话轮](001-natural-voice-turns/spec.md)：本次语音行为、实现边界和验收证据。
 - [莉莉的桌面陪伴行为](002-lily-pet-behaviors/spec.md)：空闲动作、触摸回应、安静陪伴及状态优先级。
 - [莉莉的人物描述](003-lily-persona/spec.md)：文字与电话共用的性情、表达和相处方式。

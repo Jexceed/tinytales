@@ -7,10 +7,13 @@ struct PartnerToolResult {
 
 /// Shared domain tools for typed dialogue and a continuous voice call.
 @MainActor final class PartnerTools {
+    static let maximumRounds = 3
+    static let maximumCalls = 8
     let store: LocalStore
     let settings: PartnerSettings
     let image: (String) throws -> Data?
-    var text: String
+    let text: String
+    let pictureRequest: PictureRequest
     var stagedMemories: [Memory] = []
     var stagedStories: [Story] = []
     var selectedScene: String?
@@ -32,41 +35,62 @@ struct PartnerToolResult {
         return try Data(contentsOf: url)
     }) throws {
         self.store = store; settings = try store.settings(); self.text = text; self.image = image
+        pictureRequest = PictureRequest(text)
         self.session = session ?? StorySession(); self.illustrator = illustrator
         recentDialogue = IllustrationRequest.dialogue(from: history)
         selectedStory = self.session.current?.id ?? activeStory; selectedNarrative = self.session.current
     }
+    private func savedStories() throws -> [Story] {
+        try store.stories().filter { $0.source == "cloud" }.map { story in
+            if let current = session.current, current.id == story.id { return current }
+            return story
+        }
+    }
     func execute(name: String, args: [String: Any]) throws -> PartnerToolResult {
+        if !settings.memoryEnabled && (name == "recall_memories" || name == "propose_memory") {
+            return PartnerToolResult(output:["status":"memory_disabled"])
+        }
         var result: Any = ["error": "unknown_tool"]
         var outputImage: Data?
         switch name {
         case "lookup_classics":
-            let query=String((args["query"] as? String ?? "").prefix(600))
+            let proposed = String((args["query"] as? String ?? "").prefix(600))
+            let query = ClassicalKnowledge.lookupQuery(proposed, requestedIn:text)
             let entries=ClassicalKnowledge.search(query,kind:args["kind"] as? String ?? "all")
             result=try ClassicalKnowledge.payload(entries,query:query)
             activities.append(entries.isEmpty ? "这篇还没有收进资料本" : "翻了翻成语和古诗资料本")
         case "recall_memories":
-            result = settings.memoryEnabled ? try store.memories().filter { $0.status == "approved" }.map { ["kind": $0.kind, "text": $0.text] } : []
+            result = try store.memories().filter { $0.status == "approved" }.map { ["kind": $0.kind, "text": $0.text] }
             activities.append("翻了翻记忆小花园")
         case "find_stories":
             let query = (args["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let all = try store.stories().filter { $0.source == "cloud" }
+            let stagedIDs = Set(stagedStories.map(\.id))
+            let all = try Array(stagedStories.reversed()) + savedStories().filter { !stagedIDs.contains($0.id) }
             let found = query.isEmpty ? all : all.filter { $0.title.localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(query) }
             result = Array(found.prefix(5)).map { ["id": $0.id, "title": $0.title, "summary": $0.summary] }
             activities.append("找了找我们没讲完的故事")
         case "read_story":
             let id = args["id"] as? String ?? ""
-            if let story = (stagedStories + (try store.stories())).first(where: { $0.id == id && $0.source == "cloud" }) {
-                let exact = session.current?.id == story.id ? session.current! : story
-                result = ["id": exact.id, "title": exact.title, "summary": exact.summary]; selectedStory = exact.id; selectedNarrative = exact
+            let saved = try savedStories().first { $0.id == id }
+            if let story = stagedStories.last(where: { $0.id == id }) ?? saved {
+                result = ["id": story.id, "title": story.title, "summary": story.summary]
+                // Only a committed book can become the focus of a later non-story reply.
+                if let saved { selectedStory = saved.id; selectedNarrative = saved }
+                activities.append("打开了故事本")
             } else { result = ["error": "story_not_found"] }
-            activities.append("打开了故事本")
         case "show_picture":
-            if let wanted=Scene.requested(in:text),args["id"] as? String != wanted.id {return PartnerToolResult(output:["error":"wrong_named_picture","requested_id":wanted.id,"requested_title":wanted.title],image:nil)}
-            if let selectedScene, args["id"] as? String != selectedScene {return PartnerToolResult(output:["error":"picture_already_shown","shown":selectedScene],image:nil)}
-            guard !StoryIntent.illustration(text), selectedNarrative == nil || StoryIntent.explicitGallery(text) || args["id"] as? String == session.currentPictureID || args["id"] as? String == Scene.requested(in:text)?.id else {
-                return PartnerToolResult(output:["error":"use_illustrate_story", "reason":"这是固定图库，不能冒充当前故事的配图。请调用illustrate_story。"],image:nil)
+            let requestedID = args["id"] as? String
+            switch pictureRequest {
+            case .discussion: return PartnerToolResult(output:["error":"no_picture_requested"])
+            case .gallery(let wanted):
+                if let wanted, requestedID != wanted.id { return PartnerToolResult(output:["error":"wrong_named_picture","requested_id":wanted.id,"requested_title":wanted.title]) }
+            case .drawing: return PartnerToolResult(output:["error":"use_illustrate_story"])
+            case .unspecified, .storytelling:
+                if selectedNarrative != nil && requestedID != session.currentPictureID {
+                    return PartnerToolResult(output:["error":"unrelated_gallery_picture"])
+                }
             }
+            if let selectedScene, requestedID != selectedScene {return PartnerToolResult(output:["error":"picture_already_shown","shown":selectedScene],image:nil)}
             if let id = args["id"] as? String, let scene = Scene.all.first(where: { $0.id == id }) {
                 outputImage = try image(id)
                 guard let outputImage, !outputImage.isEmpty else { throw PartnerError.message("这幅画还没有找到，请稍后再试。") }
@@ -81,17 +105,28 @@ struct PartnerToolResult {
             guard !title.isEmpty, title.count <= 35, !summary.isEmpty, summary.count <= 5000, !Safety.isPrivate(title + summary), !Safety.isRisk(title + summary) else { throw PartnerError.message("故事里有些内容暂时不适合保存。") }
             let story = Story(id: givenID ?? UUID().uuidString, title: ConversationLabels.storyTitle([title],summary:summary), summary: summary)
             stagedStories.removeAll { $0.id == story.id }; stagedStories.append(story)
-            result = ["id": story.id, "saved_after_reply_review": true]; activities.append("给故事夹上了一张小书签")
+            result = ["id": story.id, "saved_after_reply_review": true]
         case "propose_memory":
-            guard let kind = args["kind"] as? String, ["interest", "word", "english"].contains(kind), let fact = args["text"] as? String, let evidence = args["evidence"] as? String, Safety.mayRemember(fact), Safety.mayRemember(evidence) else { throw PartnerError.message("这条记忆里有不适合保存的信息。") }
-            if settings.memoryEnabled {
-                // Evidence must be from the current user utterance, not model invention.
-                guard text.contains(evidence) else { throw PartnerError.message("这条记忆还没有足够的原话依据，先不保存。") }
-                stagedMemories.append(Memory(kind: kind, text: fact, evidence: evidence))
+            guard let kind = args["kind"] as? String, ["interest", "word", "english"].contains(kind),
+                  let fact = (args["text"] as? String)?.trimmingCharacters(in:.whitespacesAndNewlines),
+                  let evidence = (args["evidence"] as? String)?.trimmingCharacters(in:.whitespacesAndNewlines),
+                  Safety.mayRemember(fact), Safety.mayRemember(evidence), text.contains(evidence) else {
+                return PartnerToolResult(output:["error":"invalid_memory_evidence"])
             }
-            result = ["status": settings.memoryEnabled ? "pending_parent_confirmation" : "memory_disabled"]; activities.append("留下一条记忆，等大人确认")
+            let candidate = Memory(kind:kind, text:fact, evidence:evidence)
+            let slot = try store.memorySlot(for:candidate, including:stagedMemories)
+            guard slot == .available else { return PartnerToolResult(output:["status":slot.rawValue]) }
+            stagedMemories.append(candidate)
+            result = ["status":"pending_parent_confirmation","saved_after_reply_review":true] as [String:Any]
         case "show_word":
-            guard let hanzi = args["hanzi"] as? String, let pinyin = args["pinyin"] as? String, let english = args["english"] as? String, hanzi.count <= 10, pinyin.count <= 80, english.count <= 80, !Safety.isPrivate(hanzi + english), !Safety.isRisk(hanzi + english) else { throw PartnerError.message("这个小词还没有准备好。") }
+            guard let hanzi = (args["hanzi"] as? String)?.trimmingCharacters(in:.whitespacesAndNewlines),
+                  let pinyin = (args["pinyin"] as? String)?.trimmingCharacters(in:.whitespacesAndNewlines),
+                  let english = (args["english"] as? String)?.trimmingCharacters(in:.whitespacesAndNewlines),
+                  hanzi.count <= 10, pinyin.count <= 80, english.count <= 80,
+                  [hanzi,pinyin,english].allSatisfy({ !$0.isEmpty && !Safety.isPrivate($0) && !Safety.isRisk($0) }),
+                  !Safety.isPrivate(hanzi + pinyin + english), !Safety.isRisk(hanzi + pinyin + english) else {
+                return PartnerToolResult(output:["error":"invalid_word_card"])
+            }
             selectedWord = WordCard(hanzi: hanzi, pinyin: pinyin, english: english); result = ["shown": true]; activities.append("写下一个故事里的小词")
         default: throw PartnerError.message("这个工具不属于莉莉的故事屋。")
         }
@@ -99,7 +134,7 @@ struct PartnerToolResult {
     }
     func perform(name: String, args: [String:Any]) async throws -> PartnerToolResult {
         guard name == "illustrate_story" else { return try execute(name:name,args:args) }
-        guard !StoryIntent.excludesDrawing(text) else {return PartnerToolResult(output:["error":"no_illustration_requested","reason":"用户没有要求实际生成图片。请回应本轮聊天或故事请求。"],image:nil)}
+        guard pictureRequest.allowsDrawing else {return PartnerToolResult(output:["error":"no_illustration_requested","reason":"按用户本轮要求继续聊天或展示指定的图库素材。"],image:nil)}
         if let art = selectedArtwork, let data = artworkData { return PartnerToolResult(output:["title":art.title,"caption":artworkCaption ?? ""],image:data) }
         guard let illustrator else { throw PartnerError.message("画画暂时没有连上，请稍后再试。") }
         let request = IllustrationRequest(text: text, story: selectedNarrative ?? session.current, dialogue: recentDialogue, progress: { [weak self] value in self?.onActivity?(value) })
@@ -109,16 +144,15 @@ struct PartnerToolResult {
         guard let story = generated.source ?? request.story else { throw PartnerError.message("你想画什么呀？告诉莉莉一个主角就可以。") }
         selectedArtwork = StoryArtwork(storyID:story.id,title:story.title,storyText:story.summary,caption:generated.caption,fileExtension:generated.fileExtension)
         artworkData = generated.data; artworkCaption = generated.caption
-        activities.append("画出了《\(story.title)》")
         return PartnerToolResult(output:["title":story.title,"source_story":story.summary,"verified_caption":generated.caption,"story_id":story.id],image:generated.data)
     }
     func prepareCheckpoint(_ reply: PartnerReply) {
-        guard selectedArtwork == nil, selectedScene == nil || (reply.classificationPresent && reply.narrative), !StoryIntent.illustration(text),
+        guard selectedArtwork == nil, selectedScene == nil || (reply.classificationPresent && reply.narrative), pictureRequest != .drawing,
               reply.narrative || (!reply.classificationPresent && (!stagedStories.isEmpty || StoryIntent.narrative(text))),
               !Safety.isPrivate(reply.reply), !Safety.isRisk(reply.reply) else { return }
         let id = stagedStories.last?.id ?? selectedNarrative?.id ?? UUID().uuidString
         let startsAnother = stagedStories.last.map { $0.id != selectedNarrative?.id } ?? false
-        let previous = startsAnother ? "" : (selectedNarrative?.summary ?? "")
+        let previous = stagedStories.last?.summary ?? selectedNarrative?.summary ?? ""
         let combined = previous.isEmpty || previous.contains(reply.reply) ? (previous.isEmpty ? reply.reply : previous) : previous + "\n" + reply.reply
         let canonical = reply.storyState.trimmingCharacters(in:.whitespacesAndNewlines)
         // Structured state replaces the old draft, so corrections do not coexist with obsolete facts.
@@ -130,13 +164,22 @@ struct PartnerToolResult {
     func commit(expectedRevision: Int) throws {
         try Task.checkCancellation()
         guard store.revision == expectedRevision else { throw PartnerError.message("本机记忆已更新，请继续新的对话。") }
-        do {
-            if let art = selectedArtwork, let data = artworkData { try ArtworkArchive.save(art,data:data) }
-            try store.transaction {
-                if settings.memoryEnabled { for memory in stagedMemories { try store.remember(memory) } }
-                for story in stagedStories { try store.saveStory(story) }
+        if let art = selectedArtwork, let data = artworkData {
+            // A verified image is published directly, without reviewing a final dialogue draft.
+            do { try ArtworkArchive.save(art,data:data) }
+            catch { ArtworkArchive.remove(art); throw error }
+            activities = ["画出了《\(art.title)》"]
+            return
+        }
+        var addedMemory = false
+        try store.transaction {
+            for candidate in stagedMemories {
+                if try store.remember(candidate, skipIfFull:true) { addedMemory = true }
             }
-        } catch { if let art = selectedArtwork { ArtworkArchive.remove(art) }; throw error }
+            for story in stagedStories { try store.saveStory(story) }
+        }
+        if addedMemory { activities.append("留下一条记忆，等大人确认") }
+        if !stagedStories.isEmpty { activities.append("给故事夹上了一张小书签") }
         if let selectedScene {session.currentPictureID=selectedScene;if pendingNarrative == nil {session.current=nil}}
         if let narrative = pendingNarrative { session.current = narrative }
         else if let selectedNarrative, selectedArtwork == nil, selectedScene == nil { session.current = selectedNarrative }

@@ -18,7 +18,7 @@ enum CallVisualMode: String, CaseIterable {
     }
 }
 extension AppModel {
-    var callVisualMode: CallVisualMode { .resolve(phone?.state, muted: phone?.muted == true) }
+    var callVisualMode: CallVisualMode { connectingCall ? .connecting : .resolve(phone?.state, muted: phone?.muted == true) }
     var callVisualLevel: Double { callVisualMode == .speaking ? phone?.outputLevel ?? 0 : phone?.inputLevel ?? 0 }
     var artworkActivity: String { phone?.artworkStatus ?? "" }
     var callStatusTitle:String { !artworkActivity.isEmpty ? artworkActivity : phone?.inputNeedsCorrection == true ? "这句没听清" : phone?.verifyingInput == true && phone?.state != .speaking ? "正在听清这句话" : phone?.state == .speaking && phone?.muted != true ? "莉莉在讲，也在听" : callVisualMode.label }

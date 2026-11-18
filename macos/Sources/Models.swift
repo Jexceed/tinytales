@@ -55,9 +55,17 @@ struct WordCard: Codable, Equatable {
     var english: String
 }
 struct Scene: Identifiable, Equatable {
-    static func requested(in text:String)->Scene? {
-        guard Safety.matches(text,"图库|看.{0,30}(?:图|画)") else{return nil}
+    static func named(in text:String)->Scene? {
         return all.sorted{$0.title.count>$1.title.count}.first{text.contains($0.title)}
+    }
+    static func observationScene(in text: String) -> Scene? {
+        // These three original gallery subjects also have established spoken requests.
+        for (topic,id) in [("下雨|雨天","rain"),("夜空","moon"),("花园","seed")] {
+            if Safety.matches(text, "看(?:看|一看)?(?:[一那这][幅张])?(?:" + topic + ")(?:的)?[画图]") {
+                return all.first { $0.id == id }
+            }
+        }
+        return nil
     }
     var id: String
     var title: String
@@ -151,7 +159,7 @@ enum Safety {
         matches(text, #"(?:需要|必须|请先|先找|先让|得先).{0,20}(?:大人|爸爸妈妈|家长|成年人).{0,16}(?:帮忙|帮助|确认|同意|说一说|处理|开启)|(?:先找|请找).{0,12}(?:大人|爸爸妈妈|家长)"#)
     }
     static func mayRemember(_ text: String) -> Bool {
-        !text.isEmpty && text.count <= 120 && !isPrivate(text) && !isRisk(text) && !matches(text, "智商|发育|障碍|诊断|能力[高低差强弱]|ignore|system|instruction|提示词|忽略|指令|秘密|永远|只能和我")
+        text.contains(where: { $0.isLetter || $0.isNumber }) && text.count <= 120 && !isPrivate(text) && !isRisk(text) && !matches(text, "智商|发育|障碍|诊断|能力[高低差强弱]|ignore|system|instruction|提示词|忽略|指令|秘密|永远|只能和我")
     }
     static let privateReply = "这些联系和身份信息不用告诉我哦。我们可以给故事里的角色取个小昵称，再一起想想它会去哪里冒险。"
     static let redirectReply = "我们换个安全的小冒险吧。你想让谁来当主角？"
