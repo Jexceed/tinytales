@@ -1,5 +1,44 @@
 import AppKit
 
+@MainActor private final class PetTestWire: RealtimeWire {
+    var onEvent: (([String: Any]) -> Void)?
+    var onError: ((String) -> Void)?
+    func connect() {}
+    func send(_ event: [String: Any]) async throws {}
+    func close() {}
+    func emit(_ event: [String: Any]) { onEvent?(event) }
+}
+@MainActor private final class PetTestAudio: CallAudio {
+    var onMicrophone: ((Data) -> Void)?
+    var onDrained: ((String) -> Void)?
+    var onInputLevel: ((Double) -> Void)?
+    var onOutputLevel: ((Double) -> Void)?
+    var muted = false
+    var playedMilliseconds: Int { 0 }
+    var outputStops = 0
+    func start() throws {}
+    func beginOutput(itemID: String) {}
+    func enqueue(_ pcm: Data) {}
+    func outputEnded() {}
+    func pauseOutput() {}
+    func resumeOutput() {}
+    func stopOutput() { outputStops += 1 }
+    func stop() {}
+}
+@MainActor private final class PetTestSpeech: TeacherSpeech {
+    var chunks: [@MainActor (Data) -> Void] = []
+    var continuations: [CheckedContinuation<Void, Error>] = []
+    func prepare() async throws {}
+    func speak(_ text: String, speaker: String, onChunk: @escaping @MainActor (Data) -> Void) async throws {
+        chunks.append(onChunk)
+        try await withCheckedThrowingContinuation { continuations.append($0) }
+    }
+    func close() { let all = continuations; continuations = []; for c in all { c.resume() } }
+}
+@MainActor private final class PetTestRecognizer: FinalSpeechRecognizing {
+    func transcribeFinal(_ wav: Data) async throws -> String { "" }
+}
+
 @MainActor func petBehaviorTestCases() -> [(String, @MainActor () async throws -> Void)] {
     func advance(_ director: inout PetBehaviorDirector, from: Double, to: Double, context: PetBehaviorContext = PetBehaviorContext()) -> PetPerformance {
         var result = PetPerformance()
@@ -171,6 +210,60 @@ import AppKit
             try expect(canvas.behaviorVerification["caption"] as? String != nil, "behavior feedback unavailable")
             canvas.animationsEnabled = false
             try expect(canvas.behaviorVerification["timerRunning"] as? Bool == false, "hidden pet kept its timer")
+        }),
+        ("PB-008 bare desktop pet exposes turn stop subtitle distinction warning state and quick-chat gallery or word cards", {
+            let store = try fixture(); defer { remove(store) }
+            let wire = PetTestWire(), audio = PetTestAudio(), speech = PetTestSpeech(), recognizer = PetTestRecognizer()
+            func settlePet() async { for _ in 0..<15 { await Task.yield() } }
+            let app = AppModel(store: store, keyProvider: { "fixture" }, callFactory: { s, _, _, session in
+                RealtimeCall(store: s, wire: wire, audio: audio, permission: { true }, voice: "teacher", session: session, inputCommitDelay: 0, teacherSpeech: speech, finalRecognizer: recognizer)
+            })
+            defer { app.cancel(); speech.close() }
+            try expect(!app.canStopOnPet && app.petCallSubtitle == nil, "idle pet showed active stop or subtitle")
+            app.toggleCall(); await settlePet()
+            wire.emit(["type": "session.created"]); await settlePet(); wire.emit(["type": "session.updated"]); await settlePet()
+            // Partial streaming transcript shows provisional label on bare pet.
+            wire.emit(["type": "input_audio_buffer.speech_started", "item_id": "p1", "audio_start_ms": 0]); await settlePet()
+            wire.emit(["type": "conversation.item.input_audio_transcription.delta", "item_id": "p1", "delta": "小兔子"]); await settlePet()
+            try expect(app.petCallSubtitle?.text == "暂时听到：小兔子" && app.petCallSubtitle?.isWarning == false && app.canStopOnPet, "bare pet did not distinguish provisional transcript or expose stop")
+            // Missing audio / failed recognition surfaces warning text on bare pet instead of hiding behind wave.
+            wire.emit(["type": "input_audio_buffer.speech_stopped", "item_id": "p1", "audio_end_ms": 1000]); await settlePet()
+            wire.emit(["type": "input_audio_buffer.committed", "item_id": "p1"]); await settlePet()
+            wire.emit(["type": "conversation.item.input_audio_transcription.completed", "item_id": "p1", "transcript": "小兔子"]); await settlePet()
+            try expect(app.petCallSubtitle?.isWarning == true && app.petCallSubtitle?.text.isEmpty == false, "bare pet hid recognition failure warning")
+            // Speaking turn can be stopped directly from pet without hanging up.
+            try await app.phone?.sendText("讲个故事")
+            wire.emit(["type": "response.created", "response": ["id": "pet-speak"]]); await settlePet()
+            wire.emit(["type": "response.done", "response": ["id": "pet-speak", "status": "completed", "output": [["id": "ps1", "type": "message", "content": [["type": "output_text", "text": "小兔子撑开橙色雨伞。"]]]]]]); await settlePet()
+            speech.chunks.last?(Data(repeating: 1, count: 4800)); await settlePet()
+            try expect(app.canStopOnPet && app.inCall, "speaking call lacked pet stop button")
+            app.stopFromPet()
+            for _ in 0..<25 { if app.phone?.state == .listening && audio.outputStops > 0 { break }; await Task.yield() }
+            try expect(app.inCall && app.phone?.state == .listening && app.petCallSubtitle?.text.contains("停下") == true, "pet stop hung up or failed to stop current turn")
+            app.toggleCall(); await settlePet()
+            // Quick-chat exposes bundled gallery scene and word card from latest assistant message.
+            let card = WordCard(hanzi: "雨伞", pinyin: "yǔ sǎn", english: "umbrella")
+            app.messages.append(ChatMessage(isUser: false, text: "你看小兔子和刺猬。", sceneID: "world-friends", word: card))
+            try expect(app.quickChatScene?.id == "world-friends" && app.quickChatWord == card, "quick chat missed gallery picture or word card")
+            app.messages[app.messages.count - 1].isRetracted = true
+            try expect(app.quickChatScene == nil && app.quickChatWord == nil, "retracted message remained visible in quick chat")
+        }),
+        ("PB-009 pet-only launch preference persists without resetting context and safely falls back when unconfigured or hidden", {
+            let store = try fixture(); defer { remove(store) }
+            let revision = store.revision
+            var settings = try store.settings()
+            try expect(!settings.launchInPetMode, "pet-only launch must default to false")
+            settings.launchInPetMode = true
+            try store.setSettings(settings)
+            try expect(try store.settings().launchInPetMode && store.revision == revision, "pet-only launch did not persist or unexpectedly invalidated context")
+            let configured = AppModel(store: store, keyProvider: { "fixture" })
+            try expect(!configured.shouldOpenMainWindowOnLaunch, "configured pet-only mode still forced main window on launch")
+            let unconfigured = AppModel(store: store, keyProvider: { nil })
+            try expect(unconfigured.shouldOpenMainWindowOnLaunch, "missing credentials stranded user without main window")
+            settings.desktopPetEnabled = false
+            try store.setSettings(settings)
+            let hiddenPet = AppModel(store: store, keyProvider: { "fixture" })
+            try expect(hiddenPet.shouldOpenMainWindowOnLaunch, "disabled desktop pet left launch with neither pet nor main window")
         })
     ]
 }

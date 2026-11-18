@@ -102,6 +102,43 @@ import Foundation
             try await backgroundWait { wire.sent.compactMap { $0["item"] as? [String:Any] }.contains { item in
                 (item["content"] as? [[String:Any]])?.contains { $0["type"] as? String == "input_image" } == true
             } }
+        }),
+        ("TL-007 phone co-creation turns preserve paragraph narration and advance the saved story bookmark", {
+            let store = try phoneFixture(), wire = TestWire(), audio = SilentCallAudio(), speech = FakeTeacherSpeech(), session = StorySession()
+            audio.manualDrain = true
+            let call = RealtimeCall(store: store, wire: wire, audio: audio, permission: { true }, voice: "teacher", session: session, inputCommitDelay: 0, teacherSpeech: speech)
+            defer { call.hangUp(); speech.finish(); try? FileManager.default.removeItem(at: store.url.deletingLastPathComponent()) }
+            try await call.connect(history: [], microphone: false, greet: false)
+            wire.emit(["type": "session.created"]); await settle(); wire.emit(["type": "session.updated"]); await settle()
+            // Turn 1 starts the story.
+            try await call.sendText("给我讲一个小恐龙找种子的故事")
+            wire.emit(["type": "response.created", "response": ["id": "s-turn-1"]]); await settle()
+            wire.emit(["type": "response.done", "response": ["id": "s-turn-1", "status": "completed", "output": [["id": "st1", "type": "message", "content": [["type": "output_text", "text": "小恐龙豆豆在草丛里找到一颗种子。"]]]]]]); await settle()
+            speech.requests.last?.chunk(Data(repeating: 1, count: 4800)); speech.finish(); await settle(); audio.drainOutput(); await settle()
+            let firstStoryID = session.current?.id
+            try require(firstStoryID != nil, "turn 1 did not create story bookmark")
+            // Turn 2: natural co-creation without the word '故事' splits paragraphs and updates the same bookmark.
+            try await call.sendText("让豆豆给种子浇一点泉水吧！")
+            let p1 = "豆豆用叶子接来清清的泉水，轻轻浇在泥土上。"
+            let p2 = "泥土里很快冒出了一片嫩绿的小芽。"
+            wire.emit(["type": "response.created", "response": ["id": "s-turn-2"]]); await settle()
+            wire.emit(["type": "response.done", "response": ["id": "s-turn-2", "status": "completed", "output": [["id": "st2", "type": "message", "content": [["type": "output_text", "text": p1 + "\n\n" + p2]]]]]]); await settle()
+            try require(speech.requests.last?.text == p1, "co-creation turn lost paragraph splitting")
+            speech.requests.last?.chunk(Data(repeating: 1, count: 4800)); speech.finish(); await settle(); audio.drainOutput(); await settle()
+            try require(speech.requests.last?.text == p2, "second paragraph of co-created turn did not play")
+            speech.requests.last?.chunk(Data(repeating: 1, count: 4800)); speech.finish(); await settle(); audio.drainOutput(); await settle()
+            try require(session.current?.id == firstStoryID && (try store.stories()).first?.summary.contains("嫩绿的小芽") == true, "phone co-creation did not advance the saved story")
+        }),
+        ("TL-008 phone open-ended inspiration requests inject curated ContentLibrary ideas", {
+            let store = try phoneFixture(), wire = TestWire()
+            let call = RealtimeCall(store: store, wire: wire, audio: SilentCallAudio())
+            defer { call.hangUp(); try? FileManager.default.removeItem(at: store.url.deletingLastPathComponent()) }
+            try await call.connect(history: [], microphone: false, greet: false)
+            wire.emit(["type": "session.created"]); await settle(); wire.emit(["type": "session.updated"]); await settle()
+            try await call.sendText("我不知道玩什么，你给我挑一个故事吧")
+            let response = wire.sent.last { $0["type"] as? String == "response.create" }?["response"] as? [String: Any]
+            let instructions = response?["instructions"] as? String ?? ""
+            try require(instructions.contains("<curated_inspirations>") && instructions.contains(LilyPersona.description), "phone did not inject ContentLibrary inspirations or dropped persona")
         })
     ]
 }
@@ -115,7 +152,8 @@ import Foundation
         defer { try? FileManager.default.removeItem(at:store.url.deletingLastPathComponent()) }
         var settings = try store.settings(); settings.memoryEnabled = false; try store.setSettings(settings)
         var names: [String] = [], replies: [String] = [], sceneIDs: [String] = [], sentImage = false
-        let call = RealtimeCall(store:store,wire:wire,audio:SilentCallAudio())
+        let audio=SilentCallAudio()
+        let call = RealtimeCall(store:store,wire:wire,audio:audio,safetyJudge:OpenAIClient(key:key))
         defer { call.hangUp() }
         wire.observeSent = { event in
             if let config = event["session"] as? [String:Any], let tools = config["tools"] as? [[String:Any]] {
@@ -138,6 +176,8 @@ import Foundation
         try await call.sendText("我想看图库里的《朋友共用一把伞》。图里有哪些动物？")
         try await waitFor({ !sceneIDs.isEmpty || !call.active },seconds:65)
         try require(sentImage && sceneIDs == ["world-friends"], "指定的图库图片没有实际展示。")
+        try require(!audio.received.isEmpty,"完成转写后未播放兼容声线。")
+        report["approvedAudioBytes"]=audio.received.count
         report["success"] = true; report["toolNames"] = names; report["displayedScenes"] = sceneIDs
         report["sentImage"] = sentImage; report["replies"] = replies
     } catch { report["success"] = false; report["error"] = error.localizedDescription }

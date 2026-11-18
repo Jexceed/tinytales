@@ -27,7 +27,31 @@ struct SpeechRecognitionContext {
         }
         return value
     }
-    static func equivalent(_ a:String,_ b:String)->Bool {VoiceTurns.normalized(a)==VoiceTurns.normalized(b)}
+    static func phoneticComparable(_ text:String)->String {
+        var value=VoiceTurns.normalized(text)
+        guard !value.isEmpty else{return ""}
+        for _ in 0..<2 {
+            guard let prefix=["嗯","呃","噢","哦"].first(where:{value.hasPrefix($0)}),value.count-prefix.count>=3 else{break}
+            value.removeFirst(prefix.count)
+        }
+        if value.count>=4,let suffix=["啊","呀","啦"].first(where:{value.hasSuffix($0)}) {
+            value.removeLast(suffix.count)
+        }
+        return String(value.map { ch -> Character in
+            switch ch {
+            case "她","它","牠","祂": return "他"
+            case "妳","祢": return "你"
+            case "噢": return "哦"
+            default: return ch
+            }
+        })
+    }
+    static func equivalent(_ a:String,_ b:String)->Bool {
+        let left=VoiceTurns.normalized(a),right=VoiceTurns.normalized(b)
+        if left==right {return true}
+        guard left.count>=3,right.count>=3 else{return false}
+        return phoneticComparable(a)==phoneticComparable(b)
+    }
 }
 
 /// The same PCM frames actually sent to Realtime, indexed by the session audio
@@ -67,4 +91,11 @@ struct VoiceInputCorrection {
     var storyBefore:Story?
     var pictureBefore:String?
     var assistantItemIDs=Set<String>()
+    var storyWrites: [String:StoryWrite] = [:]
+    mutating func record(_ write: StoryWrite) {
+        let id = write.after.id
+        if let earlier = storyWrites[id], earlier.after == write.before {
+            storyWrites[id] = StoryWrite(before:earlier.before, after:write.after)
+        } else { storyWrites[id] = write }
+    }
 }

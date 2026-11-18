@@ -24,6 +24,10 @@ import AppKit
     }
     func close() { closed = true }
     func emit(_ event: [String: Any]) { onEvent?(event) }
+    func finishAudioTranscript(_ response:String, item:String, text:String) async {
+        emit(["type":"response.output_audio_transcript.done","response_id":response,"item_id":item,"transcript":text])
+        await settle()
+    }
     func finishInput(_ id:String,_ text:String) async {
         emit(["type":"input_audio_buffer.speech_stopped","item_id":id]);await settle()
         emit(["type":"input_audio_buffer.committed","item_id":id]);await settle()
@@ -326,9 +330,9 @@ func wav(_ pcm: Data) -> Data {
                 call.onAssistantDraft={_,text in drafts.append(text)};call.onAssistantText={_,text,_,_,_ in final=text};call.onAssistantInterrupted={interrupted=$0}
                 try await call.sendText("你好")
                 wire.emit(["type":"response.created","response":["id":"stream-r"]]);await settle()
-                wire.emit(["type":"response.output_audio_transcript.delta","response_id":"stream-r","item_id":"stream-a","delta":"你好，"]);await settle()
+                wire.emit(["type":"response.output_audio_transcript.delta","response_id":"stream-r","item_id":"stream-a","delta":"你好。"]);await settle()
                 wire.emit(["type":"response.output_audio_transcript.delta","response_id":"stream-r","item_id":"stream-a","delta":"我是莉莉。"]);await settle()
-                try require(drafts == ["你好，","你好，我是莉莉。"] && final.isEmpty,"transcript waited for final response")
+                try require(drafts == ["你好。","你好。我是莉莉。"] && final.isEmpty,"transcript waited for final response")
                 wire.emit(["type":"input_audio_buffer.speech_started","item_id":"new-spoken"]);await settle()
                 wire.emit(["type":"conversation.item.input_audio_transcription.delta","item_id":"new-spoken","delta":"听我说，"]);await settle()
                 await wire.finishInput("new-spoken","听我说")
@@ -442,6 +446,7 @@ func wav(_ pcm: Data) -> Data {
                 try await call.sendText("讲个故事")
                 wire.emit(["type":"response.created","response":["id":"r2"]]); await settle()
                 wire.emit(["type":"response.output_audio.delta","response_id":"r2","item_id":"a2","delta":Data(repeating:0,count:96000).base64EncodedString()]); await settle()
+                await wire.finishAudioTranscript("r2",item:"a2",text:"小兔走过小桥。")
                 wire.emit(["type":"input_audio_buffer.speech_started","item_id":"barge-user"]); await settle()
                 wire.emit(["type":"conversation.item.input_audio_transcription.delta","item_id":"barge-user","delta":"听我说，"]);await settle()
                 await wire.finishInput("barge-user","听我说")
@@ -493,7 +498,7 @@ func wav(_ pcm: Data) -> Data {
                 try await Task.sleep(nanoseconds:100_000_000)
                 try require(wire.sent.filter{$0["type"] as? String == "response.create"}.count == before,"old tool resumed in the new turn")
             })
-        ] + voiceTurnTestCases() + teacherSpeechTestCases() + naturalTurnTestCases() + classicalKnowledgePhoneTestCases() + voiceReliabilityTestCases() + conversationLabelsPhoneTestCases() + backgroundConversationPhoneTestCases() + conversationToolPhoneTestCases()
+        ] + voiceTurnTestCases() + teacherSpeechTestCases() + naturalTurnTestCases() + classicalKnowledgePhoneTestCases() + voiceReliabilityTestCases() + conversationLabelsPhoneTestCases() + backgroundConversationPhoneTestCases() + conversationToolPhoneTestCases() + callBoundaryTests()
         for (name,test) in cases { do {try await test();passed += 1;print("PASS phone \(name)")}catch{print("FAIL phone \(name): \(error.localizedDescription)")} }
         print("Phone tests: \(passed)/\(cases.count) passed");if passed != cases.count {exit(1)}
     }

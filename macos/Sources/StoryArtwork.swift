@@ -95,7 +95,31 @@ enum StoryIntent {
         !Safety.matches(text,"不[要用想].{0,4}新故事") && Safety.matches(text,"(?:开始|编|讲|来).{0,6}(?:全新|新的|新故事)|换.{0,12}故事(?:吧|。|！|$|，|,)|重新编")
     }
     static func illustration(_ text: String) -> Bool { PictureRequest(text) == .drawing }
-    static func narrative(_ text: String) -> Bool { !Safety.matches(text,"不[要用].{0,6}[编讲].{0,6}故事|不[编讲]故事|不要故事") && !illustration(text) && Safety.matches(text,"讲.{0,8}故事|编.{0,10}故事|继续.{0,35}故事|接着讲|接着编") }
+    static func narrative(_ text: String) -> Bool { !Safety.matches(text,"不[要用].{0,6}[编讲].{0,6}故事|不[编讲]故事|不要故事") && !illustration(text) && Safety.matches(text,"讲.{0,24}故事|编.{0,24}故事|继续.{0,35}故事|接着讲|接着编") }
+    static func continuesActiveStory(_ text: String, previous: Story?) -> Bool {
+        guard let previous else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let picture = PictureRequest(trimmed)
+        if picture == .drawing { return false }
+        if case .gallery = picture { return false }
+        guard !Safety.matches(trimmed, "不[要用想].{0,6}[编讲听].{0,6}故事|不[编讲听]故事|不要故事|休息一下|不想听了"),
+              !VoiceTurnPolicy.isControlOnly(trimmed),
+              ClassicalKnowledge.exactMatches(trimmed).isEmpty,
+              !Safety.matches(trimmed, "现实|真的原因|科学|为什么|怎么读|怎么拼|什么意思|用英语|英文怎么|照片|背.{0,6}(?:古诗|诗)|讲.{0,6}成语|我今天在(?:学校|幼儿园|家里)") else { return false }
+        let words = VoiceTurns.normalized(trimmed)
+        if ["继续","继续吧","然后呢","后来呢","往下讲","接下来呢"].contains(words) { return true }
+        if Safety.matches(words,"^(?:请|你)?(?:接着讲|接着编|继续讲|继续编|改叫|改成)|^(?:我希望|我想让)(?:它|这[颗只条座个]|主角)") { return true }
+        let choice = ["我们一起让","我们就让","我们让","我想让","我想把","我选","让","叫","给","请","把"].first { words.hasPrefix($0) }
+        if words.hasPrefix("我") && choice == nil { return false }
+        let subject = choice.map { String(words.dropFirst($0.count)) } ?? words
+        guard choice != nil || Safety.matches(subject,"去|要|拿|用|把|给|想|决定|找|带|走|跑|改叫|改成|不是") else { return false }
+        if let first=subject.first, "它他她".contains(first) { return true }
+        let context = previous.title + previous.summary
+        // Match the proposed subject against the book, not a common verb later in the sentence.
+        let prefix = String(subject.prefix(2))
+        return prefix.count == 2 && context.contains(prefix)
+    }
 }
 @MainActor final class StorySession {
     var current: Story?

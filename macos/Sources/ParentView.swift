@@ -8,11 +8,12 @@ struct ParentView: View {
     @State private var keyMessage = ""
     @State private var changingKey = false
     @State private var confirmClear = false
+    @State private var confirmForgetKey = false
     init(model:AppModel,initialTab:Int=0) {self.model=model;_tab=State(initialValue:initialTab)}
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack { VStack(alignment: .leading, spacing: 7) { Text("故事屋设置").font(.system(size: 22, weight: .medium)); EmptyView() }; Spacer(); Button { dismiss() } label: { Image(systemName: "xmark").font(.system(size: 13)).padding(7) }.buttonStyle(.plain) }
-            Picker("家长管理", selection: $tab) { Text("记忆小花园").tag(0); Text("陪伴与声音").tag(1); Text("连接与数据").tag(2) }.pickerStyle(.segmented)
+            Picker("家长管理", selection: $tab) { Text(model.pendingCount > 0 ? "记忆小花园 (\(model.pendingCount))" : "记忆小花园").tag(0); Text("陪伴与声音").tag(1); Text("连接与数据").tag(2) }.pickerStyle(.segmented)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if !model.error.isEmpty { Text(model.error).font(.system(size: 15)).foregroundStyle(.orange) }
@@ -24,6 +25,7 @@ struct ParentView: View {
         }.padding(28).frame(width: 780, height: 650).background(Color.paper).foregroundStyle(Color.ink)
         .onAppear { if !model.cloudAvailable { tab = 2 } }
         .alert("清空本机记忆与故事？", isPresented: $confirmClear) { Button("先留着", role: .cancel) {}; Button("确认清空", role: .destructive) { model.clearData() } } message: { Text("这会结束当前对话。今日调用计数和连接配置会保留。") }
+        .alert("删除已保存的连接？", isPresented: $confirmForgetKey) { Button("取消", role: .cancel) {}; Button("确认删除", role: .destructive) { do { try model.forgetKey(); changingKey = false; keyMessage = "已删除本机连接。" } catch { keyMessage = error.localizedDescription } } } message: { Text("删除后需要重新填写密钥才能和莉莉聊天或打电话。") }
     }
     private var memoryTab: some View {
         VStack(alignment: .leading, spacing: 17) {
@@ -34,7 +36,7 @@ struct ParentView: View {
             section("已经记住", count: model.memories.filter { $0.status == "approved" }.count)
             ForEach(model.memories.filter { $0.status == "approved" }) { memory in NativeMemoryRow(memory: memory, onSave: model.updateMemory, onDelete: { model.removeMemory(memory) }) }
             if !model.memories.contains(where: { $0.status == "approved" }) { empty("这里还是一片空白，慢慢了解就好。") }
-            Text("确认、修改或删除记忆后会开启新对话，防止旧上下文继续引用已经纠正的信息。").font(.system(size: 14)).lineSpacing(5).foregroundStyle(Color.quiet)
+            Text("确认新候选不会打断当前对话；修改或删除已记住的内容后会开启新对话，防止旧上下文继续引用已经纠正的信息。").font(.system(size: 14)).lineSpacing(5).foregroundStyle(Color.quiet)
         }
     }
     private var settingsTab: some View {
@@ -47,6 +49,7 @@ struct ParentView: View {
             row("朗读方式", detail: "老师声音在本机生成，首次准备需要几秒；电话交流仍需联网。") { Picker("声音引擎", selection: Binding(get: { model.settings.voiceBackend }, set: { var s = model.settings; s.voiceBackend = $0; model.updateSettings(s) })) { Text("跟随莉莉的声音").tag("auto"); Text("旧版本机声音").tag("local-f5"); Text("系统声音 · 低延迟").tag("system") }.labelsHidden().frame(width: 200) }
             VoiceStatusView(voice: model.voice,inCall:model.inCall)
             row("显示桌宠", detail: "") { Toggle("显示桌宠", isOn: Binding(get: { model.settings.desktopPetEnabled }, set: { var s = model.settings; s.desktopPetEnabled = $0; model.updateSettings(s) })).labelsHidden().toggleStyle(.switch) }
+            row("启动时只显示桌宠", detail: "开启后日常打开直接陪在桌面；双击莉莉或点小房子随时打开主窗口。") { Toggle("启动时只显示桌宠", isOn: Binding(get: { model.settings.launchInPetMode }, set: { var s = model.settings; s.launchInPetMode = $0; model.updateSettings(s) })).labelsHidden().toggleStyle(.switch).disabled(!model.settings.desktopPetEnabled) }
             row("桌宠形象", detail: "") { Picker("伙伴形象", selection: Binding(get: { model.settings.petID }, set: { var s = model.settings; s.petID = $0; model.updateSettings(s) })) { ForEach(PetCatalog.choices()) { pet in Text(pet.name).tag(pet.id) } }.labelsHidden().frame(width: 185) }
             row("靠近时回应", detail: "") { Toggle("目光跟随鼠标", isOn: Binding(get: { model.settings.petFollowsPointer }, set: { var s = model.settings; s.petFollowsPointer = $0; model.updateSettings(s) })).labelsHidden().toggleStyle(.switch) }
             row("空闲小动作", detail: "看书、伸懒腰、玩星星；关闭后安静陪伴。") { Toggle("空闲小动作", isOn: Binding(get: { model.settings.petAmbientEnabled }, set: { var s = model.settings; s.petAmbientEnabled = $0; model.updateSettings(s) })).labelsHidden().toggleStyle(.switch) }
@@ -71,7 +74,7 @@ struct ParentView: View {
                 if !model.cloudAvailable { Button("恢复已保存的连接") { model.reconnectSavedKey() }.font(.system(size: 16)) }
             }
             if !keyMessage.isEmpty { Text(keyMessage).font(.system(size: 14)).foregroundStyle(Color.quiet) }
-            if changingKey { Button("删除已保存的连接", role: .destructive) { do { try model.forgetKey(); keyMessage = "已删除本机连接。" } catch { keyMessage = error.localizedDescription } }.font(.system(size: 16)) }
+            if changingKey { Button("删除已保存的连接…", role: .destructive) { confirmForgetKey = true }.font(.system(size: 16)) }
             Divider().padding(.vertical, 4)
             Text("本机数据").font(.system(size: 23, weight: .bold, design: .rounded))
             Text("记忆、虚构故事摘要和设置保存在应用支持目录。原始聊天只在当前进程的有时限会话中，录音只在内存中处理，不写入录音文件。").font(.system(size: 15)).lineSpacing(6).foregroundStyle(Color.quiet)

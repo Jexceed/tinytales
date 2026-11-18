@@ -45,6 +45,7 @@ import Foundation
             await created(wire,"reply")
             await segment(wire,"user");await transcript(wire,"user","给我讲个故事")
             wire.emit(["type":"response.output_audio.delta","response_id":"reply","item_id":"a","delta":Data(repeating:1,count:960).base64EncodedString()]);await settle()
+            await wire.finishAudioTranscript("reply",item:"a",text:"小兔走过小桥。")
             try require(audio.received.count==960 && count(wire,"response.create")==1 && count(wire,"response.cancel")==0,"duplicate VAD invalidated the current reply")
         }),
         ("muted late input events cannot create a turn or leave a thinking spinner",{
@@ -122,6 +123,7 @@ import Foundation
             let text="小马穿过彩虹桥，找到一颗闪闪发光的星星。"
             wire.emit(["type":"response.output_audio_transcript.delta","response_id":"story","item_id":"story-a","delta":text]);await settle()
             wire.emit(["type":"response.output_audio.delta","response_id":"story","item_id":"story-a","delta":Data(repeating:0,count:48000).base64EncodedString()]);await settle()
+            await wire.finishAudioTranscript("story",item:"story-a",text:text)
             await segment(wire,"echo");await transcript(wire,"echo",text)
             try require(users.isEmpty && count(wire,"response.create")==1,"assistant playback became a user request")
             await segment(wire,"stop");await transcript(wire,"stop","停一下。")
@@ -144,12 +146,14 @@ import Foundation
             wire.emit(["type":"response.created","response":["id":"late-old","metadata":old]]);await settle()
             await created(wire,"new-response")
             wire.emit(["type":"response.output_audio.delta","response_id":"new-response","item_id":"new-a","delta":Data(repeating:1,count:960).base64EncodedString()]);await settle()
+            await wire.finishAudioTranscript("new-response",item:"new-a",text:"小兔走过小桥。")
             try require(audio.received.count==960 && call.state == .speaking,"late response stole the newer turn's authorization")
         }),
         ("slow interruption and stale end events cannot stop a newer reply",{
             let (wire,audio,call)=try await ready();defer{call.hangUp()}
             try await call.sendText("讲个故事");await created(wire,"old")
             wire.emit(["type":"response.output_audio.delta","response_id":"old","item_id":"old-a","delta":Data(repeating:0,count:48000).base64EncodedString()]);await settle()
+            await wire.finishAudioTranscript("old",item:"old-a",text:"小兔走过小桥。")
             wire.delayedTypes.insert("conversation.item.truncate")
             await segment(wire,"new-user")
             wire.emit(["type":"conversation.item.input_audio_transcription.delta","item_id":"new-user","delta":"停一下。"]);await settle()
@@ -157,6 +161,7 @@ import Foundation
             try await waitFor({count(wire,"response.create")==2},seconds:1)
             await created(wire,"new")
             wire.emit(["type":"response.output_audio.delta","response_id":"new","item_id":"new-a","delta":Data(repeating:1,count:960).base64EncodedString()]);await settle()
+            await wire.finishAudioTranscript("new",item:"new-a",text:"小兔走过小桥。")
             try await Task.sleep(nanoseconds:100_000_000)
             wire.emit(["type":"response.output_audio.done","response_id":"old","item_id":"old-a"])
             wire.emit(["type":"response.output_audio_transcript.done","response_id":"old","item_id":"old-a","transcript":"继续旧故事" ]);await settle()

@@ -99,6 +99,92 @@ import Foundation
             try require(users[0].contains("举头望明月") && judge.queries.count==1,"a known recitation was treated as meaningless background speech")
             try require(VoiceTurnPolicy.quickIntent("妈妈，举头望明月",context:.init(),final:true,semanticAddress:true)==nil,"poem shortcut bypassed recipient review")
         }),
+        ("VT-026 trimmed connection pre-roll detects retained speech without indexing discarded samples",{
+            var samples=Data(repeating:3,count:9600); samples.append(Data(repeating:0,count:144_000));samples.removeFirst(9600)
+            try require(samples.startIndex>0 && !LocalSpeechContinuation.containsSpeech(samples),"discarded sound suppressed the greeting")
+            samples.append(Data(repeating:3,count:9600));samples.removeFirst(9600)
+            try require(LocalSpeechContinuation.containsSpeech(samples),"speech in trimmed pre-roll was missed")
+        }),
+        ("VT-021 continuation delay subtracts recognition wait and local teacher greeting avoids cloud generation or speech collision",{
+            let judge=TestVoiceIntent()
+            let f=try await fixture(judge:judge,commitDelay:220_000_000);defer{close(f);judge.finish(.listen)}
+            var users:[String]=[];f.call.onUserText={_,text in users.append(text)}
+            await segment(f,"slow",text:"小熊去哪里了")
+            try await Task.sleep(nanoseconds:180_000_000)
+            let resolvedAt=Date()
+            judge.finish(.listen)
+            try await waitFor({users.count==1},seconds:1)
+            try require(Date().timeIntervalSince(resolvedAt)<0.14,"continuation window slept the full delay again after slow classification")
+            // Local teacher greeting synthesizes locally without response.create, and skips when user already spoke while connecting.
+            for spokeEarly in [false,true] {
+                let wire=TestWire(),audio=SilentCallAudio(),speech=FakeTeacherSpeech()
+                let call=RealtimeCall(store:try phoneFixture(),wire:wire,audio:audio,permission:{true},voice:"teacher",inputCommitDelay:0,teacherSpeech:speech)
+                defer{call.hangUp();speech.finish()}
+                var events:[String]=[];call.onProtocolEvent={events.append($0)}
+                try await call.connect(history:[],microphone:true,greet:true)
+                if spokeEarly {audio.onMicrophone?(Data(repeating:3,count:9600));await settle()}
+                wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+                try require(count(wire,"response.create")==0,"teacher greeting still requested a cloud LLM generation")
+                if spokeEarly {
+                    try require(speech.requests.isEmpty && events.contains("greeting_skipped_for_user_speech"),"greeting talked over user speech buffered during connection")
+                } else {
+                    try require(speech.requests.count==1 && speech.requests[0].text.contains("我在呢"),"local teacher greeting was not voiced")
+                }
+            }
+        }),
+        ("VT-022 first completed story paragraph streams early to TTS and interruption trims saved bookmark to heard paragraphs",{
+            let f=try await fixture();defer{close(f)}
+            try await f.call.sendText("给我讲个小兔送苹果的故事")
+            f.wire.emit(["type":"response.created","response":["id":"stream-story"]]);await settle()
+            f.wire.emit(["type":"response.output_text.delta","response_id":"stream-story","item_id":"s1","delta":first+"\n\n奶奶拿出蓝盘子"]);await settle()
+            try require(f.speech.requests.count==1 && f.speech.requests[0].text==first,"completed first paragraph waited for response.done before starting TTS")
+            f.speech.requests[0].chunk(Data(repeating:1,count:9600));await settle()
+            f.wire.emit(["type":"response.output_text.delta","response_id":"stream-story","item_id":"s1","delta":"，小兔把苹果放进去。它们坐到窗边，一起看院子里的花。"]);await settle()
+            f.wire.emit(["type":"response.done","response":["id":"stream-story","status":"completed","output":[["id":"s1","type":"message","content":[["type":"output_text","text":first+"\n\n"+second]]]]]]);await settle()
+            try require(f.speech.requests.count==1,"response.done duplicated synthesis of the already-streaming first paragraph")
+            f.speech.finish();await settle();f.audio.drainOutput();await settle()
+            try require(f.speech.requests.count==2 && f.speech.requests[1].text==second,"second paragraph did not continue seamlessly after first paragraph drained")
+            f.speech.requests[1].chunk(Data(repeating:1,count:9600));await settle()
+            // Interrupt during paragraph 2: saved story must keep paragraph 1 and drop unheard paragraph 2.
+            await f.call.stopCurrentTurn()
+            let stories=try f.call.valueForTestingSavedStories()
+            try require(stories.count==1 && stories[0].summary.contains("轻轻敲门") && !stories[0].summary.contains("蓝盘子"),"interrupted unheard second paragraph remained in the saved story bookmark")
+            // Interrupt during paragraph 1 of a brand new call before any paragraph drains: no unheard story remains saved.
+            let store2=try phoneFixture(),wire2=TestWire(),audio2=SilentCallAudio(),speech2=FakeTeacherSpeech();audio2.manualDrain=true
+            let session2=StorySession()
+            let call2=RealtimeCall(store:store2,wire:wire2,audio:audio2,permission:{true},voice:"teacher",session:session2,inputCommitDelay:0,teacherSpeech:speech2)
+            defer{call2.hangUp();speech2.finish();try? FileManager.default.removeItem(at:store2.url.deletingLastPathComponent())}
+            try await call2.connect(history:[],microphone:true,greet:false)
+            wire2.emit(["type":"session.created"]);await settle();wire2.emit(["type":"session.updated"]);await settle()
+            try await call2.sendText("给我讲一个小熊看星星的故事")
+            wire2.emit(["type":"response.created","response":["id":"unheard"]]);await settle()
+            wire2.emit(["type":"response.done","response":["id":"unheard","status":"completed","output":[["id":"u1","type":"message","content":[["type":"output_text","text":"小熊爬上树屋看星星。"]]]]]]);await settle()
+            speech2.requests[0].chunk(Data(repeating:1,count:4800));await settle()
+            await call2.stopCurrentTurn()
+            try require(session2.current==nil && (try store2.stories()).isEmpty,"unheard first paragraph remained saved after stop")
+        }),
+        ("VT-023 session time limit waits for the active turn to finish and speaks a gentle farewell before hanging up",{
+            let store=try phoneFixture(),wire=TestWire(),audio=SilentCallAudio(),speech=FakeTeacherSpeech()
+            audio.manualDrain=true
+            let call=RealtimeCall(store:store,wire:wire,audio:audio,permission:{true},voice:"teacher",inputCommitDelay:0,teacherSpeech:speech,sessionDurationNanoseconds:120_000_000)
+            defer{call.hangUp();speech.finish();try? FileManager.default.removeItem(at:store.url.deletingLastPathComponent())}
+            var events:[String]=[],replies:[String]=[]
+            call.onProtocolEvent={events.append($0)};call.onAssistantText={_,text,_,_,_ in replies.append(text)}
+            try await call.connect(history:[],microphone:true,greet:false)
+            wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+            try await call.sendText("讲个故事")
+            wire.emit(["type":"response.created","response":["id":"active-turn"]]);await settle()
+            wire.emit(["type":"response.done","response":["id":"active-turn","status":"completed","output":[["id":"a1","type":"message","content":[["type":"output_text","text":first]]]]]]);await settle()
+            speech.requests[0].chunk(Data(repeating:1,count:9600));await settle()
+            try await Task.sleep(nanoseconds:170_000_000)
+            try require(call.active && call.state == .speaking && !events.contains("session_wind_down"),"expiry abruptly cut off an ongoing story sentence")
+            speech.finish();await settle();audio.drainOutput();await settle()
+            try await waitFor({speech.requests.count==2 && events.contains("session_wind_down")},seconds:1)
+            try require(speech.requests[1].text.contains("休息一下") && replies.last?.contains("休息一下")==true,"wind-down did not voice a warm child-friendly farewell")
+            speech.requests[1].chunk(Data(repeating:1,count:4800));speech.finish();await settle();audio.drainOutput();await settle()
+            try await waitFor({!call.active},seconds:1)
+            try require(call.notice.contains("休息一下") && wire.closed,"call did not close cleanly after farewell finished")
+        }),
         ("VT-016 a natural pause keeps the default conversation window open and renewed speech cancels the old deadline",{
             let wire=TestWire(),audio=SilentCallAudio()
             // Exercise the production default, rather than a shorter test delay.

@@ -132,8 +132,8 @@ struct DesktopPetView: View {
         VStack(spacing: 4) {
             PetCanvasHost(model: model, voice: voice, controller: controller).frame(width: 174, height: 174).help("单击聊天，双击打开对话；轻轻来回摸摸莉莉，或右键一起玩。").background { if visualMode != .idle { Circle().fill(visualMode.color.opacity(0.09)).overlay(Circle().stroke(visualMode.color.opacity(0.22),lineWidth:2)).frame(width:155,height:155) } }
             Group {
-                if model.inCall,let words=model.phone?.inputTranscript,!words.isEmpty {
-                    Text("你说："+words).font(.system(size:15,weight:.medium,design:.rounded)).lineLimit(1).truncationMode(.tail).foregroundStyle(Color.ink).padding(.horizontal,8).help(words)
+                if let subtitle = model.petCallSubtitle {
+                    Text(subtitle.text).font(.system(size:14,weight:.medium,design:.rounded)).lineLimit(1).truncationMode(.tail).foregroundStyle(subtitle.isWarning ? Color(red:0.76,green:0.33,blue:0.12) : Color.ink).padding(.horizontal,8).padding(.trailing,model.canStopOnPet ? 28 : 0).help(subtitle.text)
                 } else if !model.artworkActivity.isEmpty {
                     HStack(spacing:6) { ProgressView().controlSize(.small); Text(model.artworkActivity).font(.system(size:14,weight:.medium,design:.rounded)).foregroundStyle(Color.ink) }
                 } else if model.inCall && visualMode == .speaking {
@@ -144,8 +144,8 @@ struct DesktopPetView: View {
             }
                 .frame(width: 210,height:32)
                 .overlay(alignment: .trailing) {
-                    if voice.speaking || voice.preparing {
-                        Button { voice.stopSpeaking() } label: { Image(systemName: "speaker.slash.fill").font(.system(size: 15)).foregroundStyle(Color.sage).frame(width: 30, height: 30).background(Color.paper, in: Circle()) }.buttonStyle(.plain).help("停一下").accessibilityLabel("停止朗读").padding(.trailing, 7)
+                    if model.canStopOnPet {
+                        Button { model.stopFromPet() } label: { Image(systemName: model.inCall || model.busy ? "stop.fill" : "speaker.slash.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(model.inCall ? Color(red:0.80,green:0.24,blue:0.32) : Color.sage).frame(width: 28, height: 28).background(Color.paper, in: Circle()).overlay(Circle().stroke(Color.lilacEdge.opacity(0.45), lineWidth: 1)) }.buttonStyle(.plain).help(model.inCall ? "停下本轮，保持通话" : "停一下").accessibilityLabel(model.inCall ? "停下本轮" : "停止朗读").padding(.trailing, 7)
                     }
                 }
             HStack(spacing: 8) {
@@ -167,14 +167,31 @@ struct PetQuickChat:View {
             HStack(spacing:9) {UnicornPicture().frame(width:30,height:34);Text("莉莉").font(.system(size:21,weight:.semibold,design:.rounded));Spacer();Button(action:openHouse) {Image(systemName:"arrow.up.left.and.arrow.down.right").font(.system(size:17)).padding(7)}.buttonStyle(.plain).help("打开对话")}
             Text(model.busy ? "莉莉在想…" : model.messages.last(where:{!$0.isUser && !$0.isRetracted && $0.source != "welcome"})?.text ?? (model.entryOrigin == .voice ? "莉莉在这里。" : "你好，想聊些什么？"))
                 .font(.system(size:18)).lineSpacing(5).lineLimit(4).frame(maxWidth:.infinity,minHeight:62,alignment:.topLeading)
-            if let art = model.messages.last(where:{!$0.isUser})?.artwork, let image = NSImage(contentsOf:art.url) {
+            if let art = model.latestAssistantVisualMessage?.artwork, let image = NSImage(contentsOf:art.url) {
                 Button(action:openHouse) { Image(nsImage:image).resizable().scaledToFit().frame(maxHeight:160).clipShape(RoundedRectangle(cornerRadius:12)) }.buttonStyle(.plain).help("打开这幅画")
+            } else if let scene = model.quickChatScene, let url = scene.url, let image = NSImage(contentsOf:url) {
+                Button(action:openHouse) {
+                    VStack(alignment:.leading,spacing:6) {
+                        Image(nsImage:image).resizable().scaledToFit().frame(maxHeight:148).clipShape(RoundedRectangle(cornerRadius:12))
+                        Text("看图 · "+scene.title).font(.system(size:14,weight:.semibold,design:.rounded)).foregroundStyle(Color.sage)
+                    }
+                }.buttonStyle(.plain).help("打开这幅画")
+            }
+            if let word = model.quickChatWord {
+                HStack(spacing:14) {
+                    VStack(alignment:.leading,spacing:3) {
+                        Text(word.pinyin).font(.system(size:13)).foregroundStyle(Color.quiet)
+                        Text(word.hanzi).font(.system(size:22,weight:.bold,design:.rounded))
+                    }
+                    Spacer()
+                    Text(word.english).font(.system(size:17,weight:.medium,design:.rounded))
+                }.padding(.horizontal,14).padding(.vertical,10).toyCard(.mint,Color.sage.opacity(0.28),radius:14)
             }
             if model.showsOpeningOptions {OpeningOptions(model:model,compact:true)}
             if !model.error.isEmpty {Text(model.error).font(.system(size:14)).foregroundStyle(.orange).lineLimit(2)}
             HStack(spacing:10) {
                 TextField("写给莉莉…",text:$model.draft,axis:.vertical).textFieldStyle(.plain).font(.system(size:17)).lineLimit(1...3).focused($inputFocused).onSubmit{model.send()}.disabled(model.busy)
-                if !model.draft.isEmpty {Button {model.send()} label:{Image(systemName:"arrow.up.circle.fill").font(.system(size:29))}.buttonStyle(.plain).disabled(model.busy || model.connectingCall).help(model.connectingCall ? "接通后发送" : "发送")}
+                if !model.draft.isEmpty {Button {model.send()} label:{Image(systemName:"arrow.up.circle.fill").font(.system(size:29))}.buttonStyle(.plain).disabled(model.busy || model.holdingCallDraft).help(model.phone?.windingDown == true ? "通话结束后可发送" : model.connectingCall ? "接通后发送" : "发送")}
                 PhoneButton(model:model,compact:true)
             }.padding(12).toyCard(.white,.lilacEdge.opacity(0.5),radius:17)
             if model.inCall {
@@ -189,7 +206,9 @@ struct PetQuickChat:View {
             .onAppear {inputFocused = !model.inCall}
             .onChange(of:model.inCall) {_,active in if active {inputFocused=false}}
             .onChange(of:model.draft) {_,text in if !text.isEmpty && !model.inCall {inputFocused=true}}
-            .onChange(of:model.messages.last(where:{!$0.isUser})?.artwork?.id) {_,_ in DesktopPetController.shared.resizeQuickChat()}
+            .onChange(of:model.latestAssistantVisualMessage?.artwork?.id) {_,_ in DesktopPetController.shared.resizeQuickChat()}
+            .onChange(of:model.latestAssistantVisualMessage?.sceneID) {_,_ in DesktopPetController.shared.resizeQuickChat()}
+            .onChange(of:model.latestAssistantVisualMessage?.word) {_,_ in DesktopPetController.shared.resizeQuickChat()}
             .onChange(of:model.isCorrectingVoice) {_,_ in DesktopPetController.shared.resizeQuickChat()}
             .onChange(of:model.phone?.latestVoiceInputID) {_,_ in DesktopPetController.shared.resizeQuickChat()}
     }

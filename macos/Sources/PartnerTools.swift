@@ -29,7 +29,14 @@ struct PartnerToolResult {
     var artworkCaption: String?
     private var artworkData: Data?
     private var pendingNarrative: Story?
+    private let newStoryID = UUID().uuidString
     var preparedNarrative:Story? {pendingNarrative}
+    var spokenNarrativeRequested: Bool {
+        if Safety.matches(text,"(?:我|我们)(?:今天|昨天|明天|上星期|的亲身经历|的学校|的家人)"),
+           !Safety.matches(text,"一起编|改编|编成.{0,6}故事") { return false }
+        if !ClassicalKnowledge.exactMatches(text).isEmpty && !Safety.matches(text,"改编|一起编|另编|自编") { return false }
+        return StoryIntent.narrative(text) || StoryIntent.continuesActiveStory(text,previous:selectedNarrative ?? session.current)
+    }
     init(store: LocalStore, text: String, activeStory: String? = nil, session: StorySession? = nil, history: [[String: Any]] = [], illustrator: ((IllustrationRequest) async throws -> GeneratedArtwork)? = nil, image: @escaping (String) throws -> Data? = { id in
         guard let scene = Scene.all.first(where: { $0.id == id }), let url = scene.visionURL else { return nil }
         return try Data(contentsOf: url)
@@ -146,22 +153,26 @@ struct PartnerToolResult {
         artworkData = generated.data; artworkCaption = generated.caption
         return PartnerToolResult(output:["title":story.title,"source_story":story.summary,"verified_caption":generated.caption,"story_id":story.id],image:generated.data)
     }
-    func prepareCheckpoint(_ reply: PartnerReply) {
+    func checkpoint(for reply: PartnerReply, partial: Bool = false) -> Story? {
         guard selectedArtwork == nil, selectedScene == nil || (reply.classificationPresent && reply.narrative), pictureRequest != .drawing,
-              reply.narrative || (!reply.classificationPresent && (!stagedStories.isEmpty || StoryIntent.narrative(text))),
-              !Safety.isPrivate(reply.reply), !Safety.isRisk(reply.reply) else { return }
-        let id = stagedStories.last?.id ?? selectedNarrative?.id ?? UUID().uuidString
+              reply.narrative || (!reply.classificationPresent && (!stagedStories.isEmpty || StoryIntent.narrative(text) || StoryIntent.continuesActiveStory(text, previous: selectedNarrative ?? session.current))),
+              !Safety.isPrivate(reply.reply), !Safety.isRisk(reply.reply) else { return nil }
+        let id = stagedStories.last?.id ?? selectedNarrative?.id ?? newStoryID
         let startsAnother = stagedStories.last.map { $0.id != selectedNarrative?.id } ?? false
-        let previous = stagedStories.last?.summary ?? selectedNarrative?.summary ?? ""
+        let previous = (partial ? nil : stagedStories.last?.summary) ?? (startsAnother ? nil : selectedNarrative?.summary) ?? ""
         let combined = previous.isEmpty || previous.contains(reply.reply) ? (previous.isEmpty ? reply.reply : previous) : previous + "\n" + reply.reply
         let canonical = reply.storyState.trimmingCharacters(in:.whitespacesAndNewlines)
         // Structured state replaces the old draft, so corrections do not coexist with obsolete facts.
         let narrative = !canonical.isEmpty && canonical.count <= 3000 && !Safety.isPrivate(canonical) && !Safety.isRisk(canonical) ? (canonical.contains(reply.reply) ? canonical : canonical + "\n刚刚讲到：" + reply.reply) : String(combined.suffix(4500))
         let title=ConversationLabels.storyTitle([reply.storyTitle,stagedStories.last?.title ?? "",startsAnother ? "" : selectedNarrative?.title ?? ""],summary:narrative)
-        pendingNarrative = Story(id:id,title:title,summary:narrative)
-        stagedStories.removeAll { $0.id == id }; stagedStories.append(pendingNarrative!)
+        return Story(id:id,title:title,summary:narrative)
     }
-    func commit(expectedRevision: Int) throws {
+    func prepareCheckpoint(_ reply: PartnerReply) {
+        guard let narrative = checkpoint(for:reply) else { return }
+        pendingNarrative = narrative
+        stagedStories.removeAll { $0.id == narrative.id }; stagedStories.append(narrative)
+    }
+    @discardableResult func commit(expectedRevision: Int, deferSpokenStory: Bool = false) throws -> [StoryWrite] {
         try Task.checkCancellation()
         guard store.revision == expectedRevision else { throw PartnerError.message("本机记忆已更新，请继续新的对话。") }
         if let art = selectedArtwork, let data = artworkData {
@@ -169,19 +180,22 @@ struct PartnerToolResult {
             do { try ArtworkArchive.save(art,data:data) }
             catch { ArtworkArchive.remove(art); throw error }
             activities = ["画出了《\(art.title)》"]
-            return
+            return []
         }
         var addedMemory = false
+        var writes = [StoryWrite]()
         try store.transaction {
             for candidate in stagedMemories {
                 if try store.remember(candidate, skipIfFull:true) { addedMemory = true }
             }
-            for story in stagedStories { try store.saveStory(story) }
+            if !deferSpokenStory { for story in stagedStories { writes.append(try store.saveStory(story)) } }
         }
         if addedMemory { activities.append("留下一条记忆，等大人确认") }
-        if !stagedStories.isEmpty { activities.append("给故事夹上了一张小书签") }
+        if !writes.isEmpty { activities.append("给故事夹上了一张小书签") }
+        if deferSpokenStory { if let selectedScene { session.currentPictureID=selectedScene }; return writes }
         if let selectedScene {session.currentPictureID=selectedScene;if pendingNarrative == nil {session.current=nil}}
         if let narrative = pendingNarrative { session.current = narrative }
         else if let selectedNarrative, selectedArtwork == nil, selectedScene == nil { session.current = selectedNarrative }
+        return writes
     }
 }

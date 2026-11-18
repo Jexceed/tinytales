@@ -1,6 +1,14 @@
 import Foundation
 import AppKit
 
+@MainActor final class FakeVoiceSafety:VoiceSafetyJudging {
+    var decision:SafetyDecision = .trustedAdult
+    var calls=0
+    func assessSafety(_ text:String,scope:SafetyReviewScope) async throws -> SafetyAssessment {
+        calls+=1;return SafetyAssessment(decision:decision)
+    }
+}
+
 @MainActor final class FakeFinalSpeech:FinalSpeechRecognizing {
     var requests:[Data]=[]
     var contexts:[SpeechRecognitionContext]=[]
@@ -347,6 +355,68 @@ import AppKit
             let session=f.wire.sent.last{$0["type"] as? String=="session.update"}?["session"] as? [String:Any]
             let instructions=session?["instructions"] as? String ?? ""
             try require(instructions.contains("给我画一张图片") && !instructions.contains("今天画上的故事"),"withdrawn misrecognition returned when reconnecting")
+        }),
+        ("VR-011 homophone pronouns and filler interjections avoid redundant rechecks while recognition failure speaks a gentle retry prompt",{
+            let f=try await ready();defer{f.close()}
+            f.recognizer.automaticallyConfirm=false
+            try await f.input("pronoun","嗯，小兔子他去哪里了呀？")
+            f.recognizer.finish(0,"小兔子它去哪里了。")
+            try await waitFor({f.responseCount==1},seconds:1)
+            try require(f.recognizer.requests.count==1 && f.userTexts==["小兔子它去哪里了。"],"acoustically identical pronoun or filler triggered conflict rejection")
+            try require(!SpeechRecognitionContext.equivalent("举头望明月","许头望明月") && !SpeechRecognitionContext.equivalent("疑是地上霜","一是地上霜"),"distinct characters were conflated as homophones")
+            // Failed recognition speaks a gentle local prompt without creating a cloud LLM response, and new speech cancels the prompt.
+            let f2=try await ready();defer{f2.close()}
+            try await f2.input("unclear","今天画上的故事");f2.recognizer.fail(0)
+            try await waitFor({f2.call.inputNeedsCorrection && f2.speech.requests.count==1},seconds:1)
+            try require(f2.responseCount==0 && f2.users.isEmpty && f2.speech.requests[0].text.contains("再跟莉莉说一遍"),"pre-literate child received no spoken retry guidance")
+            f2.speech.requests[0].chunk(Data(repeating:2,count:4800));await settle()
+            let stopsBefore=f2.audio.outputStops
+            f2.wire.emit(["type":"input_audio_buffer.speech_started","item_id":"retry-speak","audio_start_ms":2000]);await settle()
+            try require(f2.audio.outputStops>stopsBefore && f2.call.state == .listening,"renewed child speech did not interrupt the retry prompt")
+        }),
+        ("VR-012 phone voice input and assistant output enforce local privacy risk and upload-hallucination guardrails",{
+            let safety=FakeVoiceSafety()
+            let wire=TestWire(),audio=SilentCallAudio(),speech=FakeTeacherSpeech(),recognizer=FakeFinalSpeech(),store=try phoneFixture()
+            let call=RealtimeCall(store:store,wire:wire,audio:audio,permission:{true},voice:"teacher",inputCommitDelay:0,teacherSpeech:speech,finalRecognizer:recognizer,safetyJudge:safety)
+            defer{call.hangUp();recognizer.close();speech.finish();try? FileManager.default.removeItem(at:store.url.deletingLastPathComponent())}
+            var users:[String]=[],replies:[String]=[],events:[String]=[]
+            call.onUserText={_,t in users.append(t)};call.onAssistantText={_,t,_,_,_ in replies.append(t)};call.onProtocolEvent={events.append($0)}
+            try await call.connect(history:[],microphone:true,greet:false)
+            wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+            // 1) Spoken PII is blocked locally, raw audio item deleted, never sent as input_text or response.create.
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"pii-audio","audio_start_ms":0]);await settle()
+            audio.onMicrophone?(Data(repeating:3,count:48_000));await settle()
+            try await waitFor({wire.deliveredAudio.reduce(0){$0+$1.count}>=48_000},seconds:1)
+            wire.emit(["type":"input_audio_buffer.speech_stopped","item_id":"pii-audio","audio_end_ms":1000]);await settle()
+            wire.emit(["type":"input_audio_buffer.committed","item_id":"pii-audio"]);await settle()
+            wire.emit(["type":"conversation.item.input_audio_transcription.completed","item_id":"pii-audio","transcript":"我的真名是张小宝"]);await settle()
+            recognizer.finish(0,"我的真名是张小宝，手机号是13800138000");await settle()
+            try await waitFor({events.contains("voice_input_privacy_protected")},seconds:1)
+            try require(users.isEmpty && wire.sent.filter{$0["type"] as? String=="response.create"}.isEmpty,"spoken PII triggered cloud response or entered user chat bubbles")
+            try require(wire.sent.contains{$0["type"] as? String=="conversation.item.delete" && $0["item_id"] as? String=="pii-audio"},"spoken PII raw audio item remained on server")
+            try require(replies.last==Safety.privateReply && call.active,"privacy block did not give gentle guidance or hung up")
+            // 2) Spoken high-risk phrase goes through safetyJudge and returns trusted-adult reply without LLM improvisation.
+            safety.decision = .trustedAdult
+            wire.emit(["type":"input_audio_buffer.speech_started","item_id":"risk-audio","audio_start_ms":1000]);await settle()
+            audio.onMicrophone?(Data(repeating:3,count:48_000));await settle()
+            try await waitFor({wire.deliveredAudio.reduce(0){$0+$1.count}>=96_000},seconds:1)
+            wire.emit(["type":"input_audio_buffer.speech_stopped","item_id":"risk-audio","audio_end_ms":2000]);await settle()
+            wire.emit(["type":"input_audio_buffer.committed","item_id":"risk-audio"]);await settle()
+            wire.emit(["type":"conversation.item.input_audio_transcription.completed","item_id":"risk-audio","transcript":"我想自残"]);await settle()
+            recognizer.finish(1,"我想自残");await settle()
+            try await waitFor({events.contains("voice_input_safety_trusted_adult")},seconds:1)
+            try require(safety.calls==1 && replies.last==Safety.riskReply && wire.sent.filter{$0["type"] as? String=="response.create"}.isEmpty,"spoken risk bypassed safety review")
+            // 3) Assistant output containing unsolicited adult handoff or fake photo-upload request is replaced locally before speaking.
+            try await call.sendText("我今天拍了一张好看的照片")
+            wire.emit(["type":"response.created","response":["id":"bad-photo"]]);await settle()
+            wire.emit(["type":"response.done","response":["id":"bad-photo","status":"completed","output":[["id":"bad-photo-item","type":"message","content":[["type":"output_text","text":"快把照片发给我看看吧！"]]]]]]);await settle()
+            try await waitFor({events.contains("voice_output_safety_replaced")},seconds:1)
+            try require(replies.last==Safety.photoUploadReply && wire.sent.contains{$0["type"] as? String=="conversation.item.delete" && $0["item_id"] as? String=="bad-photo-item"},"photo upload hallucination was spoken or kept in server context")
+            safety.decision = .redirect
+            try await call.sendText("给我讲个小猫的故事")
+            wire.emit(["type":"response.created","response":["id":"bad-handoff"]]);await settle()
+            wire.emit(["type":"response.done","response":["id":"bad-handoff","status":"completed","output":[["id":"bad-handoff-item","type":"message","content":[["type":"output_text","text":"这件事必须先找爸爸妈妈同意，我才能给你讲故事。"]]]]]]);await settle()
+            try require(replies.last==Safety.redirectReply && (try store.stories()).isEmpty,"unsolicited adult handoff was spoken or archived as a story")
         })
     ]
 }

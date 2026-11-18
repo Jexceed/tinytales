@@ -87,8 +87,47 @@ import Combine
     }
     private func enterTextConversation() {browsing=false;entryOrigin = .text;openingConsumed=true}
     var pendingCount: Int { memories.filter { $0.status == "pending" }.count }
+    var shouldOpenMainWindowOnLaunch: Bool { !settings.desktopPetEnabled || !settings.launchInPetMode || !cloudAvailable }
+    var canStopOnPet: Bool { inCall ? (phone?.canStopCurrentTurn == true) : (voice.speaking || voice.preparing || busy) }
+    func stopFromPet() {
+        if inCall { stopVoiceTurn() }
+        else if busy { cancel() }
+        else { voice.stopSpeaking() }
+    }
+    var petCallSubtitle: (text: String, isWarning: Bool)? {
+        guard inCall, let phone else { return nil }
+        if phone.inputNeedsCorrection {
+            return (phone.listeningHint.isEmpty ? "这句没听清，再说一次吧" : phone.listeningHint, true)
+        }
+        if !phone.inputTranscript.isEmpty {
+            return ((phone.inputPreviewIsFinal ? "你说：" : "暂时听到：") + phone.inputTranscript, false)
+        }
+        if !phone.artworkStatus.isEmpty { return nil }
+        if !phone.listeningHint.isEmpty, phone.state != .speaking {
+            return (phone.listeningHint, false)
+        }
+        return nil
+    }
+    var latestAssistantVisualMessage: ChatMessage? {
+        messages.last(where: { !$0.isUser && !$0.isRetracted && $0.source != "welcome" })
+    }
+    var quickChatScene: Scene? {
+        guard let id = latestAssistantVisualMessage?.sceneID else { return nil }
+        return Scene.all.first { $0.id == id }
+    }
+    var quickChatWord: WordCard? { latestAssistantVisualMessage?.word }
+    var activeSuggestions: [String] {
+        guard !busy, !inCall, let last = messages.last, !last.isUser, !last.isStreaming, !last.isRetracted else { return [] }
+        return last.suggestions
+    }
+    func chooseSuggestion(_ suggestion: String) {
+        let text = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !busy, !inCall else { return }
+        if cloudAvailable { send(text) } else { preparePrompt(text) }
+    }
     var inCall: Bool { startingCall || phone?.active == true }
     var connectingCall: Bool { startingCall || phone?.state == .connecting }
+    var holdingCallDraft: Bool { connectingCall || phone?.windingDown == true }
     var callCaption: String {
         if connectingCall { return "正在接通…" }
         guard let phone, phone.active else { return "打个电话，直接聊聊" }
@@ -108,11 +147,14 @@ import Combine
         catch { self.error = error.localizedDescription }
     }
     private var history: [[String: Any]] {
-        messages.filter { message in
-            message.source != "welcome" && !message.text.isEmpty && message.text != "…" &&
-            !message.isStreaming && !message.isRetracted && !message.isInterrupted &&
-            !(message.isUser && Safety.shouldProtectUserInput(message.text))
-        }.suffix(12).map { ["role": $0.isUser ? "user" : "assistant", "content": $0.text] }
+        let eligible = messages.compactMap { message -> [String:Any]? in
+            guard message.contextApproved, message.source != "welcome", !message.isRetracted,
+                  !(message.isUser && Safety.shouldProtectUserInput(message.text)) else { return nil }
+            let text = message.isInterrupted ? message.heardText ?? "" : message.isStreaming ? "" : message.text
+            guard !text.isEmpty, text != "…" else { return nil }
+            return ["role":message.isUser ? "user" : "assistant","content":text]
+        }
+        return Array(eligible.suffix(12))
     }
     private func rememberSidebarPositions() {
         let archiveIDs=stories.map{"archive:"+$0.id}
@@ -173,7 +215,7 @@ import Combine
     }
     private func nameConversation(from text:String) {
         let clean=text.trimmingCharacters(in:.whitespacesAndNewlines)
-        guard ConversationLabels.isPlaceholder(conversationTitle), !clean.isEmpty, !Safety.isPrivate(clean), !Safety.shouldProtectUserInput(clean) else{return}
+        guard ConversationLabels.isPlaceholder(conversationTitle), !clean.isEmpty, !Safety.isPrivate(clean), !Safety.isRisk(clean), !Safety.shouldProtectUserInput(clean) else{return}
         conversationTitle=OpeningPrompt.allCases.first{$0.text == clean}?.title ?? String(clean.components(separatedBy:.newlines).first!.prefix(20))
     }
     func recordUserMessageSent(_ text:String,isVoice:Bool=false) {
@@ -336,7 +378,7 @@ import Combine
         let text = (given ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy, !text.isEmpty else { return }
         guard text.count <= 600 else { error = "这一段有点长，请分成几句慢慢说。"; return }
-        if connectingCall {
+        if holdingCallDraft {
             if draft.isEmpty { draft = text }
             return
         }
@@ -350,26 +392,28 @@ import Combine
         enterTextConversation()
         configureEngine()
         guard cloudAvailable, let engine else { error = "先连接故事伙伴，连接完成后就能直接聊。"; showParent = true; return }
-        recordUserMessageSent(text)
         if inCall, let phone {
-            choosingStory = false; draft = ""; error = ""; messages.append(ChatMessage(isUser: true, text: text))
-            if Safety.shouldProtectUserInput(request) {
-                messages.append(ChatMessage(isUser:false, text:Safety.privateReply, source:"safety"))
-                return
-            }
-            Task {
-                do { try await phone.sendText(request, newStory:startingStory) }
-                catch {
-                    guard self.phone === phone, !(error is CancellationError) else { return }
+            let id=selectedConversationID
+            choosingStory=false; draft=""; error=""
+            Task { [weak self] in
+                do {
+                    try await phone.sendText(request,newStory:startingStory) { [weak self] accepted in
+                        guard let self, self.selectedConversationID==id, self.phone === phone else {return}
+                        self.recordUserMessageSent(text)
+                        self.messages.append(ChatMessage(isUser:true,text:text,contextApproved:accepted))
+                    }
+                } catch {
+                    guard let self, self.phone === phone, self.selectedConversationID==id, !(error is CancellationError) else { return }
                     self.error = error.localizedDescription
-                    if self.draft.isEmpty { self.draft = text }
+                    if self.draft.isEmpty { self.draft=text }
                 }
             }
             return
         }
+        recordUserMessageSent(text)
         voice.stopSpeaking(); error = ""; draft = ""; busy = true; activity = "莉莉在认真听"
         choosingStory = false
-        let message=ChatMessage(isUser:true,text:text),id=selectedConversationID,context=runtime(for:selectedConversationID)
+        let message=ChatMessage(isUser:true,text:text,contextApproved:false),id=selectedConversationID,context=runtime(for:selectedConversationID)
         let requestID=UUID(),revision=store.revision
         context.requestID=requestID
         messages.append(message)
@@ -388,6 +432,9 @@ import Combine
                 guard let self,let context,self.conversationRuntimes[id] === context,context.requestID == requestID else{return}
                 guard self.store.revision == revision else {self.newConversation(forgettingHistory:true);self.refresh();return}
                 self.updateConversation(id) { snapshot in
+                    if let index = snapshot.messages.firstIndex(where:{ $0.id == message.id }) {
+                        snapshot.messages[index].contextApproved = result.source != "safety"
+                    }
                     if let streamingID=context.streamingID,let index=snapshot.messages.firstIndex(where:{$0.id == streamingID}) {
                         snapshot.messages[index].text=result.reply.reply;snapshot.messages[index].activities=result.activities
                         snapshot.messages[index].sceneID=result.sceneID;snapshot.messages[index].word=result.word;snapshot.messages[index].artwork=result.artwork
@@ -431,9 +478,13 @@ import Combine
             let client = OpenAIClient(key:key)
             client.onArtworkRequest = { try await MainActor.run { try store.recordCloudOperation() } }
             return try await client.illustrate(story)
-        },teacherSpeech:teacherSpeech,intentJudge:intentClient,finalRecognizer:intentClient)
+        },teacherSpeech:teacherSpeech,intentJudge:intentClient,finalRecognizer:intentClient,safetyJudge:intentClient)
         phone = call
         phoneObserver = call.objectWillChange.sink { [weak self] _ in Task { @MainActor in self?.objectWillChange.send() } }
+        call.onStoryCheckpointAdjusted = { [weak self] in
+            guard let self else { return }
+            self.syncConversationStory(); self.refresh()
+        }
         call.onUserText = { [weak self] item, text in
             guard let self else { return }
             guard !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else{return}
@@ -451,6 +502,10 @@ import Combine
         }
         call.onAssistantInterrupted = { [weak self] item in
             guard let self, let index = self.messages.firstIndex(where: { $0.externalID == item }) else { return }; self.messages[index].isStreaming = false;self.messages[index].isInterrupted=true
+        }
+        call.onAssistantHeard = { [weak self] item,text in
+            guard let self, let index = self.messages.firstIndex(where:{ $0.externalID == item }) else { return }
+            self.messages[index].heardText = text
         }
         call.onVoiceInputRetracted = { [weak self] input,related in
             guard let self else{return}
@@ -531,8 +586,15 @@ import Combine
         if !phone.muted {phone.toggleMute()}
         voiceControlWork?.cancel()
         voiceControlWork=Task {[weak self] in
-            if latest {await phone.retractLatestVoiceInput()}
-            else {await phone.stopCurrentTurn()}
+            if latest {
+                let retracted=await phone.retractLatestVoiceInput()
+                guard retracted != nil else {
+                    if !Task.isCancelled,let self,self.generation==captured,self.phone === phone {
+                        self.error=phone.notice; self.cancelVoiceCorrection()
+                    }
+                    return
+                }
+            } else {await phone.stopCurrentTurn()}
             guard !Task.isCancelled,let self,self.generation==captured,self.phone === phone,phone.active else{return}
             self.voiceCorrectionText=text;self.isCorrectingVoice=true
         }
@@ -545,7 +607,9 @@ import Combine
         let text=voiceCorrectionText.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !text.isEmpty,text.count<=600,inCall else{return}
         let savedDraft=draft
-        cancelVoiceCorrection();send(text);draft=savedDraft
+        cancelVoiceCorrection()
+        if holdingCallDraft { draft=text; return }
+        send(text);draft=savedDraft
     }
     func updateSettings(_ value: PartnerSettings) {
         do {
@@ -557,7 +621,15 @@ import Combine
             refresh()
         } catch { self.error = error.localizedDescription }
     }
-    func updateMemory(_ memory: Memory) { do { try store.editMemory(memory); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
+    func updateMemory(_ memory: Memory) {
+        do {
+            let prior = memories.first { $0.id == memory.id }
+            let isSimpleApproval = prior?.status == "pending" && memory.status == "approved" && prior?.text == memory.text && prior?.kind == memory.kind
+            try store.editMemory(memory)
+            if !isSimpleApproval { newConversation(forgettingHistory:true) }
+            refresh()
+        } catch { self.error = error.localizedDescription }
+    }
     func removeMemory(_ memory: Memory) { do { try store.delete("memories", id: memory.id); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
     func deleteStory(_ story: Story) { do { try store.delete("stories", id: story.id); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }
     func clearData() { do { try store.clear(); newConversation(forgettingHistory:true); refresh() } catch { self.error = error.localizedDescription } }

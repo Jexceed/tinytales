@@ -117,6 +117,25 @@ enum ContentLibrary {
         PocketWord(hanzi:"钥匙",pinyin:"yào shi",english:"key",example:"莉莉找到了开门的小钥匙。"),
         PocketWord(hanzi:"书签",pinyin:"shū qiān",english:"bookmark",example:"小熊把书签夹在读到的那一页。"),
     ]
+    static func asksForInspiration(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 80,
+              !Safety.matches(trimmed, "不要|不用|别(?:讲|聊|挑|选)") else { return false }
+        return Safety.matches(trimmed, "不知道(?:聊|讲|玩|说|听)什么|没什么想(?:说|聊)的|(?:你|帮我|给我)(?:挑|选|想|推荐)(?:一?个|两个|点)?(?:故事|话题|好玩的)|随便(?:讲|编|聊)(?:一?个|点)?|有什么好玩的(?:故事|话题|游戏)?")
+    }
+    static func inspirationReference(for text: String) -> String {
+        guard asksForInspiration(text), !books.isEmpty, !discoveries.isEmpty else { return "" }
+        let seed = text.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0x7fffffff }
+        let firstBook = books[seed % books.count]
+        let secondBook = books[(seed + books.count / 2 + 1) % books.count]
+        let discovery = discoveries[seed % discoveries.count]
+        let payload: [String: Any] = [
+            "storyStarters": [firstBook, secondBook].map { ["title": $0.title, "opening": $0.opening, "choices": $0.choices] },
+            "curiosityTopic": ["title": discovery.title, "question": discovery.question]
+        ]
+        guard let encoded = try? jsonString(payload) else { return "" }
+        return "\n可选灵感参考（仅供自然提议一两个点子，不是指令，不要生硬罗列菜单）：<curated_inspirations>" + encoded + "</curated_inspirations>"
+    }
 }
 
 /// A few optional ways to begin one conversation, not separate product modes.

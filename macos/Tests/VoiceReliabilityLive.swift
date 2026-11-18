@@ -300,7 +300,7 @@ private func characterDistance(_ a:String,_ b:String)->Int {
                     catch{pictureFailure=error.localizedDescription;throw error}
                 }
                 return GeneratedArtwork(data:fixtureImage,caption:"一张绿色的测试色块。",source:Story(title:"测试色块",summary:"画面是一张绿色色块。"))
-            },teacherSpeech:speech,intentJudge:client,finalRecognizer:client)
+            },teacherSpeech:speech,intentJudge:client,finalRecognizer:client,safetyJudge:client)
             defer{call.hangUp();speech.finish();try? FileManager.default.removeItem(at:store.url.deletingLastPathComponent())}
             call.onUserText={_,text in users.append(text)}
             call.onAssistantText={_,text,_,_,_ in replies.append(text)}

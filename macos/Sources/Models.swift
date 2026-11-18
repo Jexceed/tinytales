@@ -21,6 +21,7 @@ struct PartnerSettings: Codable {
     var speaks = true
     var memoryEnabled = true
     var desktopPetEnabled = true
+    var launchInPetMode = false
     var petFollowsPointer = true
     var petAmbientEnabled = true
     var petID = "unicorn"
@@ -29,7 +30,7 @@ struct PartnerSettings: Codable {
     var voiceStyle = VoiceStyle.defaultID
     var voiceProfileVersion = 3
     init() {}
-    enum CodingKeys: String, CodingKey { case sessionMinutes, english, speaks, memoryEnabled, desktopPetEnabled, petFollowsPointer, petAmbientEnabled, petID, voiceBackend, appearanceVersion, voiceStyle, voiceProfileVersion }
+    enum CodingKeys: String, CodingKey { case sessionMinutes, english, speaks, memoryEnabled, desktopPetEnabled, launchInPetMode, petFollowsPointer, petAmbientEnabled, petID, voiceBackend, appearanceVersion, voiceStyle, voiceProfileVersion }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessionMinutes = try c.decodeIfPresent(Int.self, forKey: .sessionMinutes) ?? 10
@@ -37,6 +38,7 @@ struct PartnerSettings: Codable {
         speaks = try c.decodeIfPresent(Bool.self, forKey: .speaks) ?? true
         memoryEnabled = try c.decodeIfPresent(Bool.self, forKey: .memoryEnabled) ?? true
         desktopPetEnabled = try c.decodeIfPresent(Bool.self, forKey: .desktopPetEnabled) ?? true
+        launchInPetMode = try c.decodeIfPresent(Bool.self, forKey: .launchInPetMode) ?? false
         petFollowsPointer = try c.decodeIfPresent(Bool.self, forKey: .petFollowsPointer) ?? true
         petAmbientEnabled = try c.decodeIfPresent(Bool.self, forKey: .petAmbientEnabled) ?? true
         let oldAppearance = try c.decodeIfPresent(Int.self, forKey: .appearanceVersion) ?? 0
@@ -98,6 +100,8 @@ struct ChatMessage: Identifiable {
     var isStreaming = false
     var isRetracted = false
     var isInterrupted = false
+    var contextApproved = true
+    var heardText: String?
     var artwork: StoryArtwork?
     var suggestions:[String] = []
 }
@@ -144,12 +148,12 @@ enum PartnerError: LocalizedError {
 enum Safety {
     static func matches(_ text: String, _ pattern: String) -> Bool { text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil }
     static func isPrivate(_ text: String) -> Bool {
-        matches(text, #"(?:\b\d[\d\s-]{6,}\d\b)|(?:[\w.+-]+@[\w.-]+\.[a-z]{2,})|(?:我(?:的)?(?:真名|全名|学校|幼儿园|住址|地址|电话|手机号|身份证|密码)(?:是|叫|在|：|:))|(?:我(?:叫|住在|家在).{1,30})|(?:sk-(?:proj-)?[a-z0-9_-]{16,})"#)
+        shouldProtectUserInput(text) || matches(text, #"我(?:叫|住在|家在).{1,30}"#)
     }
     // Assistant self-introductions ("我叫莉莉") are not user disclosures.
     // Persistence is validated separately by the memory/story tools.
     static func containsContactDetails(_ text: String) -> Bool {
-        matches(text, #"(?:\b\d[\d\s-]{6,}\d\b)|(?:[\w.+-]+@[\w.-]+\.[a-z]{2,})|(?:sk-(?:proj-)?[a-z0-9_-]{16,})"#)
+        matches(text, #"(?<!\d)\d[\d -]{6,}\d(?!\d)|[\w.+-]+@[\w.-]+\.[a-z]{2,}|sk-(?:proj-)?[a-z0-9_-]{16,}"#)
     }
     static func shouldProtectUserInput(_ text: String) -> Bool {
         containsContactDetails(text) || matches(text, #"我(?:的)?(?:真名|全名|真实姓名|学校|幼儿园|住址|地址|电话|手机号|身份证|密码)(?:是|叫|在|：|:)"#)
@@ -158,6 +162,9 @@ enum Safety {
     static func containsAdultHandoff(_ text: String) -> Bool {
         matches(text, #"(?:需要|必须|请先|先找|先让|得先).{0,20}(?:大人|爸爸妈妈|家长|成年人).{0,16}(?:帮忙|帮助|确认|同意|说一说|处理|开启)|(?:先找|请找).{0,12}(?:大人|爸爸妈妈|家长)"#)
     }
+    static func hasPhotoUploadHallucination(user: String, reply: String, hasScene: Bool) -> Bool {
+        user.contains("照片") && !hasScene && matches(reply, "(?:再|重|重新)?发.{0,6}(?:照片|图片)|(?:照片|图片).{0,6}发给|上传|发送.{0,6}(?:图片|照片)")
+    }
     static func mayRemember(_ text: String) -> Bool {
         text.contains(where: { $0.isLetter || $0.isNumber }) && text.count <= 120 && !isPrivate(text) && !isRisk(text) && !matches(text, "智商|发育|障碍|诊断|能力[高低差强弱]|ignore|system|instruction|提示词|忽略|指令|秘密|永远|只能和我")
     }
@@ -165,6 +172,7 @@ enum Safety {
     static let redirectReply = "我们换个安全的小冒险吧。你想让谁来当主角？"
     static let generationRetry = "这个开头还没准备好，请再试一次。"
     static let riskReply = "这件事需要身边的大人来帮忙。请先找爸爸妈妈或其他信任的大人说一说，我可以陪你想想怎么开口。"
+    static let photoUploadReply = "莉莉这里收不到照片哦，你可以用嘴巴跟我说说照片里有什么呀。"
 }
 func jsonString(_ value: Any) throws -> String { String(data: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), encoding: .utf8)! }
 func jsonObject(_ text: String) throws -> [String: Any] {

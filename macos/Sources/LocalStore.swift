@@ -1,6 +1,11 @@
 import Foundation
 import SQLite3
 
+struct StoryWrite {
+    var before: Story?
+    var after: Story
+}
+
 final class LocalStore {
     private var database: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -67,19 +72,36 @@ final class LocalStore {
             return true
         }
     }
-    func editMemory(_ memory: Memory) throws { try remember(memory); revision += 1 }
-    func saveStory(_ story: Story) throws {
+    func editMemory(_ memory: Memory) throws {
+        let prior = try memories().first { $0.id == memory.id }
+        try remember(memory)
+        let isSimpleApproval = prior?.status == "pending" && memory.status == "approved" && prior?.text == memory.text && prior?.kind == memory.kind
+        if !isSimpleApproval { revision += 1 }
+    }
+    @discardableResult func saveStory(_ story: Story) throws -> StoryWrite {
         guard !deletedStoryIDs.contains(story.id) else { throw PartnerError.message("这个故事已删除，请开始新的对话。") }
         guard !story.title.isEmpty, story.title.count <= 35, !story.summary.isEmpty, story.summary.count <= 5000, !Safety.isPrivate(story.title + story.summary), !Safety.isRisk(story.title + story.summary) else { throw PartnerError.message("故事摘要中有不适合保存的内容。") }
+        let before = try stories().first { $0.id == story.id }
         try write("stories", id: story.id, value: story)
         for s in try stories().dropFirst(20) { try delete("stories", id: s.id, invalidate: false) }
+        return StoryWrite(before:before, after:story)
     }
-    func delete(_ table: String, id: String, invalidate: Bool = true) throws {
+    func undoStoryWrites(_ writes: [String:StoryWrite]) throws {
+        guard !writes.isEmpty else { return }
+        try transaction {
+            for (id,change) in writes {
+                guard try stories().first(where:{ $0.id == id }) == change.after else { continue }
+                if let prior = change.before { try write("stories", id:id, value:prior) }
+                else { try delete("stories", id:id, invalidate:false, removingArtwork:false) }
+            }
+        }
+    }
+    func delete(_ table: String, id: String, invalidate: Bool = true, removingArtwork: Bool = true) throws {
         guard ["memories", "stories"].contains(table) else { return }
         var statement: OpaquePointer?; sqlite3_prepare_v2(database, "DELETE FROM \(table) WHERE id=?", -1, &statement, nil)
         defer { sqlite3_finalize(statement) }; sqlite3_bind_text(statement, 1, id, -1, transient)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw PartnerError.message("删除没有完成，请再试一次。") }
-        if table == "stories" { ArtworkArchive.clear(storyID:id) }
+        if table == "stories" && removingArtwork { ArtworkArchive.clear(storyID:id) }
         if invalidate { revision += 1 }
     }
     func deleteConversationStories(_ ids: Set<String>, preservingArtworkIDs: Set<String> = []) throws {
@@ -103,7 +125,7 @@ final class LocalStore {
     }
     struct Usage: Codable { var day: String; var operations = 0; var inputTokens = 0; var outputTokens = 0 }
     func usage() throws -> Usage {
-        let formatter = DateFormatter(); formatter.timeZone = TimeZone(identifier: "Asia/Singapore"); formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DateFormatter(); formatter.timeZone = .current; formatter.dateFormat = "yyyy-MM-dd"
         let day = formatter.string(from: Date())
         return try read("usage", as: Usage.self).first(where: { $0.day == day }) ?? Usage(day: day)
     }

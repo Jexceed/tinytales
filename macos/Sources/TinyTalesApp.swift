@@ -3,6 +3,7 @@ import AppKit
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     static var openMainWindow: (() -> Void)?
+    static weak var launchModel: AppModel?
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
         if let index=args.firstIndex(of:"--verify-teacher-voice"),args.count>index+1 {
@@ -24,8 +25,19 @@ import AppKit
         }
         NSApplication.shared.setActivationPolicy(.regular)
         if let url = Bundle.main.url(forResource: "TinyTales", withExtension: "icns"), let icon = NSImage(contentsOf: url) { NSApplication.shared.applicationIconImage = icon }
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { Self.openMainWindow?() }
+        DesktopPetController.shared.registerOpener { Self.openMainWindow?() }
+        if let model = Self.launchModel { DesktopPetController.shared.attach(model) }
+        let forcePetOnly = args.contains("--sample-pet-only-launch")
+        let shouldOpenMain = !forcePetOnly && ((args.contains("--verify-launch") || args.contains("--inspect-launch")) || (Self.launchModel?.shouldOpenMainWindowOnLaunch ?? true))
+        if shouldOpenMain {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { Self.openMainWindow?() }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                for window in NSApp.windows where window.title == "小小故事屋" { window.orderOut(nil) }
+                if let model = Self.launchModel { LaunchVerification.run(model) }
+            }
+        }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { Self.openMainWindow?(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -173,7 +185,16 @@ import AppKit
                 model.browsing = false
                 model.messages.append(ChatMessage(isUser: false, text: "小兔子把伞往小刺猬身边挪了挪。\n小刺猬会对它说什么呢？", sceneID: "rain", word: WordCard(hanzi: "雨伞", pinyin: "yǔ sǎn", english: "umbrella")))
             }
+            if testMode, args.contains("--sample-pet-only-launch") {
+                var settings = try store.settings(); settings.launchInPetMode = true; settings.desktopPetEnabled = true
+                try store.setSettings(settings); model.refresh()
+            }
+            if testMode, args.contains("--sample-pending-memory") {
+                try store.remember(Memory(kind: "interest", text: "喜欢发光的小恐龙", evidence: "我喜欢发光的小恐龙"))
+                model.refresh()
+            }
             _model = StateObject(wrappedValue: model)
+            AppDelegate.launchModel = model
             AppDelegate.openMainWindow = { MainWindowController.shared.show(model) }
         } catch {
             let alert = NSAlert(); alert.messageText = "小小故事屋暂时无法打开数据"; alert.informativeText = error.localizedDescription; alert.runModal(); exit(1)
@@ -289,7 +310,8 @@ private final class BackgroundConversationPreview:StreamingPartnerModel {
                     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("report.json"))
                 } catch { fputs("Pet diagnostics: \(error.localizedDescription)\n", stderr) }
             }
-            let result: [String: Any] = ["success": !windows.isEmpty && (!model.settings.desktopPetEnabled || DesktopPetController.shared.isVisible),"desktopPetEnabled":model.settings.desktopPetEnabled, "bundleID": Bundle.main.bundleIdentifier ?? "", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "", "connectionAvailable": model.cloudAvailable, "fixture": args.contains("--verify-launch"),"fixtureStore":args.contains("--verify-launch") ? model.store.url.path : "", "voiceStyle":model.settings.voiceStyle, "storyArtworkCount":model.messages.filter { $0.artwork != nil }.count,"artworkInProgress":!(model.phone?.artworkStatus.isEmpty ?? true),"entryOrigin":model.entryOrigin == .voice ? "voice" : "text","openingOptions":model.showsOpeningOptions ? OpeningPrompt.allCases.count : 0,"callActive":model.inCall,"callState":model.phone?.state.rawValue ?? "ended","inputTranscriptPresent":!(model.phone?.inputTranscript.isEmpty ?? true),"listeningHintPresent":!(model.phone?.listeningHint.isEmpty ?? true),"placeholderUserMessages":model.messages.filter{$0.isUser && ($0.text=="…" || $0.text=="...")}.count,"quickChatSnapshotSaved":quickChatCaptured,"contentLobbyVisible":false,"sidebarVisible":true,"sidebarStoryCount":model.stories.count,"sidebarGeneratingCount":model.conversations.filter{$0.isGenerating}.count,"sidebarUnreadCount":model.conversations.filter{$0.hasUnreadReply}.count,"visibleSceneCount":model.messages.filter{$0.sceneID != nil}.count,"sidebarStatusOrder":args.contains("--verify-launch") ? model.conversations.map(\.statusLabel) : [],"sidebarConversationCount":model.conversations.count,"sidebarOrder":model.conversations.map(\.navigationID),"sidebarTitleOrder":args.contains("--verify-launch") ? model.conversations.map(\.title) : [],"sidebarTimestampOrder":args.contains("--verify-launch") ? model.conversations.map{ConversationLabels.timestamp($0.updatedAt)} : [],"conversationStarted":model.isConversationStarted,"draftPresent":!model.draft.isEmpty,"selectedConversationID":model.isConversationStarted ? model.selectedConversationID : "","selectedConversationTitle":model.isConversationStarted ? model.conversationTitle : "","headerTitle":model.isConversationStarted ? model.conversationTitle : "莉莉","selectedRowCount":model.conversations.filter{$0.id == model.selectedConversationID}.count, "reopened": args.contains("--verify-reopen"), "snapshotSaved": captured, "petSnapshotSaved": petCaptured, "desktopPet": DesktopPetController.shared.verification, "windows": windows.map { ["title": $0.title, "width": $0.frame.width, "height": $0.frame.height] }]
+            let petOnlySample = args.contains("--sample-pet-only-launch")
+            let result: [String: Any] = ["success": (petOnlySample ? windows.isEmpty : !windows.isEmpty) && (!model.settings.desktopPetEnabled || DesktopPetController.shared.isVisible),"petOnlyLaunch":petOnlySample,"shouldOpenMainOnLaunch":model.shouldOpenMainWindowOnLaunch,"pendingMemoryCount":model.pendingCount,"activeSuggestionCount":model.activeSuggestions.count,"desktopPetEnabled":model.settings.desktopPetEnabled, "bundleID": Bundle.main.bundleIdentifier ?? "", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "", "connectionAvailable": model.cloudAvailable, "fixture": args.contains("--verify-launch"),"fixtureStore":args.contains("--verify-launch") ? model.store.url.path : "", "voiceStyle":model.settings.voiceStyle, "storyArtworkCount":model.messages.filter { $0.artwork != nil }.count,"artworkInProgress":!(model.phone?.artworkStatus.isEmpty ?? true),"entryOrigin":model.entryOrigin == .voice ? "voice" : "text","openingOptions":model.showsOpeningOptions ? OpeningPrompt.allCases.count : 0,"callActive":model.inCall,"callState":model.phone?.state.rawValue ?? "ended","inputTranscriptPresent":!(model.phone?.inputTranscript.isEmpty ?? true),"listeningHintPresent":!(model.phone?.listeningHint.isEmpty ?? true),"placeholderUserMessages":model.messages.filter{$0.isUser && ($0.text=="…" || $0.text=="...")}.count,"quickChatSnapshotSaved":quickChatCaptured,"contentLobbyVisible":false,"sidebarVisible":true,"sidebarStoryCount":model.stories.count,"sidebarGeneratingCount":model.conversations.filter{$0.isGenerating}.count,"sidebarUnreadCount":model.conversations.filter{$0.hasUnreadReply}.count,"visibleSceneCount":model.messages.filter{$0.sceneID != nil}.count,"sidebarStatusOrder":args.contains("--verify-launch") ? model.conversations.map(\.statusLabel) : [],"sidebarConversationCount":model.conversations.count,"sidebarOrder":model.conversations.map(\.navigationID),"sidebarTitleOrder":args.contains("--verify-launch") ? model.conversations.map(\.title) : [],"sidebarTimestampOrder":args.contains("--verify-launch") ? model.conversations.map{ConversationLabels.timestamp($0.updatedAt)} : [],"conversationStarted":model.isConversationStarted,"draftPresent":!model.draft.isEmpty,"selectedConversationID":model.isConversationStarted ? model.selectedConversationID : "","selectedConversationTitle":model.isConversationStarted ? model.conversationTitle : "","headerTitle":model.isConversationStarted ? model.conversationTitle : "莉莉","selectedRowCount":model.conversations.filter{$0.id == model.selectedConversationID}.count, "reopened": args.contains("--verify-reopen"), "snapshotSaved": captured, "petSnapshotSaved": petCaptured, "desktopPet": DesktopPetController.shared.verification, "windows": windows.map { ["title": $0.title, "width": $0.frame.width, "height": $0.frame.height] }]
             try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: args[index + 1]))
             if args.contains("--verify-launch"),!args.contains("--keep-preview-open") { for message in model.messages { if let art = message.artwork { ArtworkArchive.remove(art) } }; NSApplication.shared.terminate(nil) }
         }

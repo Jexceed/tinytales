@@ -14,6 +14,18 @@ struct LocalSpeechContinuation {
     func remainingQuietTime(_ delay:UInt64,now:Double=ProcessInfo.processInfo.systemUptime)->Double {
         max(0,Double(delay)/1e9-(now-lastActivity))
     }
+    static func containsSpeech(_ pcm:Data)->Bool {
+        guard pcm.count>=960 else{return false}
+        var voiced=0.0
+        for offset in stride(from:pcm.startIndex,to:pcm.endIndex,by:960) {
+            let slice=pcm.subdata(in:offset..<min(offset+960,pcm.endIndex))
+            if AudioMeter.level(slice)>=0.015 {
+                voiced+=Double(slice.count)/48_000
+                if voiced>=0.08 {return true}
+            } else {voiced=0}
+        }
+        return false
+    }
     mutating func reset() {voicedSeconds=0;lastActivity = -Double.infinity}
 }
 

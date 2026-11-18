@@ -21,15 +21,15 @@ for path in files:
 
 mapped = 0
 for feature, prefix, suites in [
-    ("001-natural-voice-turns", "VT", [("NaturalTurnTests.swift", "PhoneTests.swift", "naturalTurnTestCases()")]),
-    ("007-voice-reliability", "VR", [("VoiceReliabilityTests.swift", "PhoneTests.swift", "voiceReliabilityTestCases()")]),
+    ("001-natural-voice-turns", "VT", [("NaturalTurnTests.swift", "PhoneTests.swift", "naturalTurnTestCases()"), ("CallBoundaryTests.swift", "PhoneTests.swift", "callBoundaryTests()")]),
+    ("007-voice-reliability", "VR", [("VoiceReliabilityTests.swift", "PhoneTests.swift", "voiceReliabilityTestCases()"), ("CallBoundaryTests.swift", "PhoneTests.swift", "callBoundaryTests()")]),
     ("005-conversation-deletion", "CD", [("ConversationDeletionTests.swift", "NativeTests.swift", "conversationDeletionTestCases()")]),
     ("008-conversation-labels", "CL", [("ConversationLabelsTests.swift", "NativeTests.swift", "conversationLabelsTestCases()"), ("ConversationLabelsPhoneTests.swift", "PhoneTests.swift", "conversationLabelsPhoneTestCases()")]),
     ("009-background-conversations", "BG", [("BackgroundConversationTests.swift", "NativeTests.swift", "backgroundConversationTestCases()"), ("BackgroundConversationPhoneTests.swift", "PhoneTests.swift", "backgroundConversationPhoneTestCases()")]),
     ("004-conversation-artwork", "AI", [("ArtworkTests.swift", "NativeTests.swift", "artworkTestCases()")]),
     ("002-lily-pet-behaviors", "PB", [("PetBehaviorTests.swift", "NativeTests.swift", "petBehaviorTestCases()")]),
     ("006-classical-knowledge", "CK", [("ClassicalKnowledgeTests.swift", "NativeTests.swift", "classicalKnowledgeTestCases()"), ("ClassicalKnowledgePhoneTests.swift", "PhoneTests.swift", "classicalKnowledgePhoneTestCases()")]),
-    ("010-conversation-tools", "TL", [("ConversationToolTests.swift", "NativeTests.swift", "conversationToolTestCases()"), ("ConversationToolPhoneTests.swift", "PhoneTests.swift", "conversationToolPhoneTestCases()")]),
+    ("010-conversation-tools", "TL", [("ConversationToolTests.swift", "NativeTests.swift", "conversationToolTestCases()"), ("ConversationToolPhoneTests.swift", "PhoneTests.swift", "conversationToolPhoneTestCases()"), ("CallBoundaryTests.swift", "PhoneTests.swift", "callBoundaryTests()")]),
 ]:
     spec = ROOT / f"specs/{feature}/spec.md"
     required = set(re.findall(rf"^\| ({prefix}-\d{{3}}) \|", spec.read_text(), re.MULTILINE))

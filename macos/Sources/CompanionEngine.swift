@@ -79,10 +79,15 @@ enum LilyPersona {
             case .trustedAdult: return safe(Safety.riskReply)
             }
         }
+        if !newStory,let question=ClassicalKnowledge.shortQuoteConfirmation(for:text,history:history) {
+            history += [["role":"user","content":text],["role":"assistant","content":question]]
+            turnCount += 1
+            return PartnerResult(reply:PartnerReply(reply:question,suggestions:[]),activities:[],source:"library")
+        }
         let startingNew = newStory || StoryIntent.startsNewStory(text)
         if startingNew { session.reset(); activeStory = nil }
         let settings = try store.settings()
-        let prompt = Self.instructions(english: settings.english, memory: settings.memoryEnabled, activeStory: session.current?.id ?? activeStory) + (try ClassicalKnowledge.reference(for:text)) + (session.current.map { "\n当前正在讲的准确片段（配图依据）：" + $0.summary } ?? "") + (startingNew ? "\n用户已在新故事创作界面确认当前选题。请根据用户输入开始一个全新故事，先讲短短的开头再让用户接着编；不要续接旧故事，保存时id为null。" : "")
+        let prompt = Self.instructions(english: settings.english, memory: settings.memoryEnabled, activeStory: session.current?.id ?? activeStory) + (try ClassicalKnowledge.reference(for:text)) + ContentLibrary.inspirationReference(for: text) + (session.current.map { "\n当前正在讲的准确片段（配图依据）：" + $0.summary } ?? "") + (startingNew ? "\n用户已在新故事创作界面确认当前选题。请根据用户输入开始一个全新故事，先讲短短的开头再让用户接着编；不要续接旧故事，保存时id为null。" : "")
         var totalTools = 0
         var toolRounds = 0
         var repairNote = ""
@@ -167,7 +172,7 @@ enum LilyPersona {
                     if let reviewer = model as? ContentQualityReviewingModel, ContentQuality.needsReview(user:text,reply:reply,previous:session.current), toolkit.selectedArtwork == nil {
                         var problems:[String] = []
                         if !reply.narrative && ContentQuality.continuesStory(text,previous:session.current) {problems.append("用户在继续当前虚构故事，正文已回应故事变化，但narrative=false使进度没有保存。请按最新情节设置narrative=true，storyState同步更新已经发生的事件，而非仍保留愿望或准备状态。")}
-                        if text.contains("照片"), toolkit.selectedScene == nil, Safety.matches(reply.reply,"(?:再|重|重新)?发.{0,5}照片|上传|发送.{0,5}图片") {problems.append("当前应用没有照片上传入口，不能让用户发照片。说明这里没有收到照片，可请用户先描述画面。")}
+                        if Safety.hasPhotoUploadHallucination(user: text, reply: reply.reply, hasScene: toolkit.selectedScene != nil) {problems.append("当前应用没有照片上传入口，不能让用户发照片。说明这里没有收到照片，可请用户先描述画面。")}
                         let minimum=ContentQuality.minimumLength(user:text,reply:reply)
                         if reply.reply.count < minimum {problems.append("reply正文只有\(reply.reply.count)字，请展开到至少\(minimum)字；增加具体动作、因果和小结果，不靠空泛议论凑字。字数不包含storyState。")}
                         if problems.isEmpty {

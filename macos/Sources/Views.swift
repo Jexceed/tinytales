@@ -106,7 +106,8 @@ struct MainView:View {
                             ConversationWelcome(model:model).frame(maxWidth:.infinity).padding(.top,44).padding(.bottom,24)
                         }
                         ForEach(conversation) {message in
-                            MessageView(message:message,onRead:message.isStreaming || model.inCall || message.isRetracted ? nil : {model.voice.speak(message.text)},onEdit:model.canCorrectVoice(message) ? {model.editVoiceInput(message.externalID)} : nil,onRetry:model.canCorrectVoice(message) ? {model.retryVoiceInput(message.externalID)} : nil)
+                            let isLatestAssistant = !message.isUser && message.id == conversation.last?.id
+                            MessageView(message:message,onRead:message.isStreaming || model.inCall || message.isRetracted ? nil : {model.voice.speak(message.text)},onEdit:model.canCorrectVoice(message) ? {model.editVoiceInput(message.externalID)} : nil,onRetry:model.canCorrectVoice(message) ? {model.retryVoiceInput(message.externalID)} : nil,onSelectSuggestion:isLatestAssistant && !model.busy && !model.inCall && !message.isStreaming && !message.isRetracted ? {model.chooseSuggestion($0)} : nil)
                                 .id(message.id)
                         }
                         if (model.busy && !conversation.contains(where:{$0.isStreaming})) || !model.artworkActivity.isEmpty {
@@ -179,7 +180,15 @@ struct MainView:View {
                     }
                 }
             }.frame(maxHeight:.infinity,alignment:.top)
-            Button {model.showParent=true} label:{Label("设置",systemImage:"gearshape").font(.system(size:15,weight:.medium)).foregroundStyle(Color.quiet).frame(maxWidth:.infinity,alignment:.leading).padding(10)}.buttonStyle(.plain)
+            Button {model.showParent=true} label:{
+                HStack(spacing:8) {
+                    Label("设置",systemImage:"gearshape").font(.system(size:15,weight:.medium)).foregroundStyle(Color.quiet)
+                    if model.pendingCount > 0 {
+                        Text("\(model.pendingCount)").font(.system(size:12,weight:.bold,design:.rounded)).foregroundStyle(.white).padding(.horizontal,6).padding(.vertical,2).background(Color.sage,in:Capsule())
+                    }
+                    Spacer(minLength:0)
+                }.frame(maxWidth:.infinity,alignment:.leading).padding(10)
+            }.buttonStyle(.plain).accessibilityValue(model.pendingCount > 0 ? "\(model.pendingCount)条待确认记忆" : "")
         }.padding(16).frame(width:236).frame(maxHeight:.infinity,alignment:.top).background(Color.sidebarPaper.opacity(0.28))
     }
     private var header:some View {
@@ -274,7 +283,7 @@ struct NativeComposer: View {
                 TextField("写给莉莉…", text: $model.draft, axis: .vertical).textFieldStyle(.plain).font(.system(size: 18, design: .rounded)).lineLimit(1...3).focused($inputFocused).onSubmit { model.send() }.disabled(model.busy)
                 if voice.speaking || voice.preparing { Button { voice.stopSpeaking() } label: { Label("停一下", systemImage: "speaker.slash.fill").font(.system(size: 17, weight: .medium)) }.buttonStyle(.plain) }
                 if model.busy { Button("停一下") { model.cancel() }.font(.system(size: 18, weight: .semibold)).buttonStyle(.bordered) }
-                else if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Button { model.send() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .bold)).foregroundStyle(.white).frame(width: 48, height: 48).background(Color.sage, in: Circle()) }.buttonStyle(.plain).disabled(model.connectingCall).help(model.connectingCall ? "接通后发送" : "发送") }
+                else if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Button { model.send() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .bold)).foregroundStyle(.white).frame(width: 48, height: 48).background(Color.sage, in: Circle()) }.buttonStyle(.plain).disabled(model.holdingCallDraft).help(model.phone?.windingDown == true ? "通话结束后可发送" : model.connectingCall ? "接通后发送" : "发送") }
                 PhoneButton(model: model)
             }.padding(12).toyCard(.white, .lilacEdge.opacity(0.5), radius: 19)
         }.onAppear {inputFocused = !model.inCall}
@@ -287,8 +296,9 @@ struct MessageView: View {
     var onRead: (() -> Void)? = nil
     var onEdit: (() -> Void)? = nil
     var onRetry: (() -> Void)? = nil
+    var onSelectSuggestion: ((String) -> Void)? = nil
     private var preferredWidth: CGFloat {
-        if message.artwork != nil || message.sceneID != nil || message.word != nil { return 600 }
+        if message.artwork != nil || message.sceneID != nil || message.word != nil || (onSelectSuggestion != nil && !message.suggestions.isEmpty) { return 600 }
         let font = NSFont.systemFont(ofSize: 18, weight: .medium)
         let lineWidth = message.text.components(separatedBy: .newlines).map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
         return min(message.isUser ? 490 : 700, max(message.isUser ? (onEdit != nil || message.isRetracted ? 220 : 145) : 300, ceil(lineWidth) + 38))
@@ -325,6 +335,18 @@ struct MessageView: View {
                 if message.isStreaming { HStack(spacing:5) { ForEach(0..<3) { _ in Circle().fill(Color.sage.opacity(0.5)).frame(width:4,height:4) } }.accessibilityLabel("正在生成") }
                 if let word = message.word {
                     HStack(spacing: 22) { VStack(alignment: .leading, spacing: 7) { Text(word.pinyin).font(.system(size: 18)); Text(word.hanzi).font(.system(size: 34, weight: .bold, design: .rounded)).tracking(4) }; Spacer(); Text(word.english).font(.system(size: 23, weight: .medium, design: .rounded)) }.padding(19).toyCard(.mint, Color.sage.opacity(0.3), radius: 18)
+                }
+                if let onSelectSuggestion, !message.suggestions.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(message.suggestions, id: \.self) { suggestion in
+                            Button { onSelectSuggestion(suggestion) } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "sparkles").font(.system(size: 12))
+                                    Text(suggestion).font(.system(size: 15, weight: .medium, design: .rounded)).lineLimit(1)
+                                }.foregroundStyle(Color.sage).padding(.horizontal, 12).padding(.vertical, 7).background(Color.softSage.opacity(0.65), in: Capsule()).overlay(Capsule().stroke(Color.lilacEdge.opacity(0.45), lineWidth: 1))
+                            }.buttonStyle(StoryButtonStyle()).accessibilityLabel("后续建议，\(suggestion)")
+                        }
+                    }.padding(.top, 2)
                 }
             }.padding(.horizontal, 18).padding(.vertical, 15).frame(maxWidth: preferredWidth, alignment: .leading).toyCard(message.isUser ? .peach.opacity(0.6) : .white, message.isUser ? .peachEdge : .lilacEdge.opacity(0.65), radius: 20)
             if !message.isUser { Spacer(minLength: 40) }

@@ -12,6 +12,7 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     @Published private(set) var artworkStatus = ""
     var active: Bool { state != .ended }
     var onUserText: ((String, String) -> Void)?
+    var onAssistantHeard: ((String,String) -> Void)?
     var onAssistantInterrupted: ((String) -> Void)?
     private var draftItemID: String?
     var onAssistantDraft: ((String, String) -> Void)?
@@ -25,7 +26,7 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     var latestVoiceInputText:String? {lastVoiceInput?.text}
     var hasPendingVoiceInput:Bool {inputTurns.hasUnfinished || inputTurns.readySegments != nil || verifyingInput || inputNeedsCorrection}
     var inputPreviewIsFinal:Bool {inputTurns.readySegments != nil && !verifyingInput && !inputNeedsCorrection}
-    var canStopCurrentTurn:Bool {active && (outputEngaged || hasPendingVoiceInput || toolWork != nil)}
+    var canStopCurrentTurn:Bool {active && (outputEngaged || hasPendingVoiceInput || toolWork != nil || inputSubmissionID != nil || outputSafetyID != nil)}
     var onVoiceInputRetracted:((String,Set<String>)->Void)?
     private let finalRecognizer:FinalSpeechRecognizing?
     private let finalRecognitionTimeout:UInt64
@@ -56,8 +57,34 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     private var assistantTextOrder:[String]=[]
     private let transcriptionTimeout:UInt64
     private let inputCommitDelay:UInt64
+    private let sessionDurationNanoseconds:UInt64?
+    private let safetyJudge:VoiceSafetyJudging?
     private var pendingInputResponse:Task<Void,Never>?
     private var localContinuation=LocalSpeechContinuation()
+    private var lastSpeechStoppedAt:Double?
+    private var localPromptTask:Task<Void,Never>?
+    private var activePromptPlaybackID:String?
+    @Published private(set) var windingDown=false
+    private static var greetingAudioCache:[String:[Data]]=[:]
+    private var finalSpokenBookmark: Story?
+    private var spokenWrite: StoryWrite?
+    private var booksAtTurnStart: [String:Story] = [:]
+    private var narrationHistoryIndex: Int?
+    private var inputSubmissionID: UUID?
+    private var outputSafetyID: UUID?
+    private struct CloudSpeechItem {
+        var pcm = Data()
+        var hasAudio = false
+        var hasFinalTranscript = false
+        var approved = false
+        var audioEnded = false
+        var drained = false
+    }
+    private var cloudSpeech: [String:CloudSpeechItem] = [:]
+    private var publishedDrafts: [String:String] = [:]
+    private var streamedResponseID:String?
+    private var streamedParagraphCount=0
+    var onStoryCheckpointAdjusted:(()->Void)?
     private var playbackUntil=Date.distantPast
     private var outputFrames=0
     private let teacherSpeech:TeacherSpeech?
@@ -124,9 +151,11 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     private var activeInputID: String?
     private var expiry: Task<Void, Never>?
     private var connectionTimeout: Task<Void, Never>?
-    init(store: LocalStore, wire: RealtimeWire, audio: CallAudio, permission: @escaping () async -> Bool = { await MicrophoneAuthorization.shared.obtain() }, voice: String = "shimmer", session: StorySession? = nil, illustrator: ((IllustrationRequest) async throws -> GeneratedArtwork)? = nil, transcriptionTimeout:UInt64 = 12_000_000_000, inputCommitDelay:UInt64 = VoiceTurns.continuationDelay,teacherSpeech:TeacherSpeech?=nil,intentJudge:VoiceIntentJudging?=nil,intentTimeout:UInt64=2_500_000_000,finalRecognizer:FinalSpeechRecognizing?=nil,finalRecognitionTimeout:UInt64=8_000_000_000) {
+    init(store: LocalStore, wire: RealtimeWire, audio: CallAudio, permission: @escaping () async -> Bool = { await MicrophoneAuthorization.shared.obtain() }, voice: String = "shimmer", session: StorySession? = nil, illustrator: ((IllustrationRequest) async throws -> GeneratedArtwork)? = nil, transcriptionTimeout:UInt64 = 12_000_000_000, inputCommitDelay:UInt64 = VoiceTurns.continuationDelay,teacherSpeech:TeacherSpeech?=nil,intentJudge:VoiceIntentJudging?=nil,intentTimeout:UInt64=2_500_000_000,finalRecognizer:FinalSpeechRecognizing?=nil,finalRecognitionTimeout:UInt64=8_000_000_000,sessionDurationNanoseconds:UInt64?=nil,safetyJudge:VoiceSafetyJudging?=nil) {
         self.store = store; self.wire = wire; self.audio = audio; self.permission = permission; self.voice = voice; self.storySession = session ?? StorySession(); self.illustrator = illustrator;self.transcriptionTimeout=transcriptionTimeout
         self.inputCommitDelay=inputCommitDelay
+        self.sessionDurationNanoseconds=sessionDurationNanoseconds
+        self.safetyJudge=safetyJudge
         self.teacherSpeech=teacherSpeech
         self.intentJudge=intentJudge;self.intentTimeout=intentTimeout
         self.finalRecognizer=finalRecognizer;self.finalRecognitionTimeout=finalRecognitionTimeout
@@ -167,7 +196,13 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         wire.connect()
         connectionTimeout = Task { try? await Task.sleep(nanoseconds: 20_000_000_000); if !Task.isCancelled && generation == id && state == .connecting { fail("电话连接等得有些久，请重新接通。") } }
         let minutes = (try? store.settings().sessionMinutes) ?? 10
-        expiry = Task { try? await Task.sleep(nanoseconds: UInt64(minutes) * 60_000_000_000); if !Task.isCancelled && generation == id { notice = "这一段聊了好多，休息一下再接着讲吧。"; hangUp() } }
+        let durationNS = sessionDurationNanoseconds ?? UInt64(minutes) * 60_000_000_000
+        let graceNS = min(45_000_000_000, max(1_500_000_000, durationNS * 2))
+        expiry = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: durationNS)
+            guard !Task.isCancelled, let self, self.generation == id, self.active else { return }
+            await self.windDownAndHangUp(connection: id, graceNanoseconds: graceNS)
+        }
     }
     private func session() throws -> [String: Any] {
         let settings = try store.settings()
@@ -195,7 +230,13 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     }
     func hangUp(notify: Bool = true) {
         let wasActive = active; generation = UUID(); connectionTimeout?.cancel(); expiry?.cancel()
-        connectionTimeout = nil; expiry = nil; wire.close(); audio.stop(); toolkit = nil; artworkStatus = ""
+        connectionTimeout = nil; expiry = nil; windingDown = false
+        localPromptTask?.cancel(); localPromptTask = nil; activePromptPlaybackID = nil
+        finishInterruptedNarration()
+        booksAtTurnStart.removeAll()
+        resetReviewedOutput()
+        inputSubmissionID = nil; streamedResponseID = nil; streamedParagraphCount = 0; lastSpeechStoppedAt = nil
+        wire.close(); audio.stop(); toolkit = nil; artworkStatus = ""
         toolWork?.cancel(); toolWork = nil; artworkNarration = false
         currentAudioID = nil; responseID = nil; responseRunning = false; state = .ended; muted = false; inputLevel = 0; outputLevel = 0
         receivedTranscripts.removeAll(); responseTranscripts.removeAll()
@@ -218,8 +259,9 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     func toggleMute() {
         guard active else { return }; muted.toggle(); audio.muted = muted; if muted { inputLevel = 0 }
         if muted {
+            cancelLocalPrompt(); inputSubmissionID=nil
             pendingInputResponse?.cancel();pendingInputResponse=nil
-            localContinuation.reset()
+            localContinuation.reset();lastSpeechStoppedAt=nil
             microphoneQueue=[];microphoneRemainder=Data();startupAudio=Data();inputTranscript=""
             let pending=inputTurns.segments.filter{!$0.consumed && (!$0.finished || $0.accepted)}
             cancelAllRecognition();inputNeedsCorrection=false;inputAcceptanceFloorMS=audioTimeline.durationMilliseconds
@@ -238,7 +280,7 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         }
     }
     private func appendMicrophone(_ data:Data) {
-        guard active,!muted else{return}
+        guard active,!muted,!windingDown else{return}
         localContinuation.observe(data)
         inputPackets+=1
         if activePlaybackID != nil && !outputSuspended {inputPacketsWhileSpeaking+=1}
@@ -271,19 +313,33 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     private func createResponse(instructions:String?=nil) async throws {
         let connection=generation,turn=turnID
         await waitForContextRepair()
-        guard active,generation==connection,turnID==turn else{throw CancellationError()}
+        guard active,!windingDown,generation==connection,turnID==turn else{throw CancellationError()}
+        let confirmation = instructions==nil && toolRounds==0 ? ClassicalKnowledge.shortQuoteConfirmation(for:lastUserText,history:history) : nil
+        if let confirmation,VoiceStyle.speaker(voice) != nil,teacherSpeech != nil {
+            let item=RealtimeItemID.make("quote")
+            lastVoiceInput?.assistantItemIDs.insert(item)
+            try await wire.send(["type":"conversation.item.create","item":["id":item,"type":"message","role":"assistant","content":[["type":"output_text","text":confirmation]]]])
+            guard active,generation==connection,turnID==turn else{throw CancellationError()}
+            history=Array((history+[["role":"assistant","content":confirmation]]).suffix(12))
+            rememberAssistant(item,text:confirmation);onAssistantText?(item,confirmation,nil,nil,[])
+            await speakLocalPrompt(confirmation)
+            return
+        }
         responsePermits.append(turnID)
         var response:[String:Any]=["metadata":["tinytales_turn":turnID.uuidString]]
         if let instructions {response["instructions"]=VoiceStyle.delivery+"\n"+instructions}
         else {
-            let reference=try ClassicalKnowledge.reference(for:lastUserText)
+            let reference=(try ClassicalKnowledge.reference(for:lastUserText))+ContentLibrary.inspirationReference(for:lastUserText)
             if !reference.isEmpty {
                 // Response instructions override session instructions, so retain
                 // the persona and call rules. References last for this response only.
                 response["instructions"]=(try session()["instructions"] as? String ?? "")+reference
             }
         }
-        if instructions != nil || toolRounds >= PartnerTools.maximumRounds || toolCount >= PartnerTools.maximumCalls {
+        if let confirmation {
+            response["instructions"]=(response["instructions"] as? String ?? VoiceStyle.delivery)+"\n只读这句篇目确认，然后等用户回答："+confirmation
+        }
+        if instructions != nil || confirmation != nil || toolRounds >= PartnerTools.maximumRounds || toolCount >= PartnerTools.maximumCalls {
             response["tool_choice"] = "none"
         } else if toolRounds == 0 {
             switch toolkit?.pictureRequest {
@@ -351,8 +407,25 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     private func outputDrained(_ item:String) {
         guard active,item==activePlaybackID,!outputSuspended else{return}
         activePlaybackID=nil;expectedPlaybackID=nil;currentAudioID=nil;playbackUntil=Date().addingTimeInterval(0.6)
+        if item==activePromptPlaybackID {
+            activePromptPlaybackID=nil
+            if !outputEngaged {state = .listening}
+            onProtocolEvent?("local_prompt_finished")
+            return
+        }
+        if cloudSpeech[item]?.approved == true {
+            if cloudSpeech[item]?.drained == false, let text=responseTranscripts[item],!text.isEmpty,!artworkNarration {
+                cloudSpeech[item]?.drained=true
+                history=Array((history+[["role":"assistant","content":text]]).suffix(12))
+                onAssistantHeard?(item,text)
+                if finalSpokenBookmark==nil, toolkit?.spokenNarrativeRequested==true, let heard=toolkit?.checkpoint(for:PartnerReply(reply:text,suggestions:[]),partial:true) { saveHeardBookmark(heard) }
+            }
+            if let bookmark=finalSpokenBookmark { saveHeardBookmark(bookmark); finalSpokenBookmark=nil }
+        }
         if localNarrating {
             heardParagraphs.append(currentParagraph);waitingAtBoundary=true
+            recordHeardNarration(complete: !responseRunning && paragraphQueue.isEmpty && finalSpokenBookmark != nil)
+
             onProtocolEvent?("narration_paragraph_finished")
         }
         guard !responseRunning else{return}
@@ -367,9 +440,167 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     private func continueAtBoundaryIfReady() {
         guard waitingAtBoundary,!outputSuspended,!inputTurns.hasUnfinished,inputTurns.readySegments==nil,pendingFinalIntents.isEmpty else{return}
         if paragraphQueue.isEmpty {
+            guard !responseRunning else{return}
             localNarrating=false;waitingAtBoundary=false;teacherItems=[];heardParagraphs=[];responseIsNarrative=false
+            finalSpokenBookmark=nil; narrationHistoryIndex=nil
             state = .listening
         } else {startNextParagraph()}
+    }
+    private func cancelLocalPrompt() {
+        localPromptTask?.cancel();localPromptTask=nil
+        if let promptID=activePromptPlaybackID {
+            activePromptPlaybackID=nil
+            if activePlaybackID==promptID || expectedPlaybackID==promptID {
+                activePlaybackID=nil;expectedPlaybackID=nil;currentAudioID=nil
+                audio.stopOutput();outputLevel=0
+                if !outputEngaged {state = .listening}
+            }
+        }
+    }
+    private func speakLocalPrompt(_ text:String,cacheKey:String?=nil,waitUntilDrained:Bool=false) async {
+        guard active,let teacherSpeech,let speaker=VoiceStyle.speaker(voice) else{return}
+        cancelLocalPrompt()
+        let connection=generation,playback="prompt-"+UUID().uuidString
+        activePromptPlaybackID=playback;expectedPlaybackID=playback
+        let useCache=cacheKey.map{"\(speaker):\($0)"}
+        let canCache=teacherSpeech is TeacherSpeechClient
+        let work=Task {[weak self] in
+            guard let self else{return}
+            do {
+                if canCache,let key=useCache,let cached=Self.greetingAudioCache[key],!cached.isEmpty {
+                    for pcm in cached {
+                        guard self.active,self.generation==connection,self.activePromptPlaybackID==playback,!Task.isCancelled else{return}
+                        self.activePlaybackID=playback;self.audio.beginOutput(itemID:playback)
+                        self.audio.enqueue(pcm);self.onAudio?(pcm);self.state = .speaking
+                    }
+                    self.audio.outputEnded()
+                    return
+                }
+                var collected:[Data]=[]
+                var frames=0
+                try await teacherSpeech.speak(text,speaker:speaker){[weak self] pcm in
+                    guard let self,self.active,self.generation==connection,self.activePromptPlaybackID==playback,!Task.isCancelled else{return}
+                    if frames==0 {self.onProtocolEvent?("local_prompt_started")}
+                    frames+=pcm.count/2;collected.append(pcm)
+                    self.activePlaybackID=playback;self.audio.beginOutput(itemID:playback)
+                    self.audio.enqueue(pcm);self.onAudio?(pcm);self.state = .speaking
+                }
+                guard !Task.isCancelled,self.active,self.generation==connection,self.activePromptPlaybackID==playback else{return}
+                if canCache,let key=useCache,frames>0 {Self.greetingAudioCache[key]=collected}
+                if frames>0 {self.audio.outputEnded()} else {self.activePromptPlaybackID=nil;self.expectedPlaybackID=nil}
+            } catch {
+                if self.generation==connection,self.activePromptPlaybackID==playback {
+                    self.activePromptPlaybackID=nil;self.expectedPlaybackID=nil
+                    if !self.outputEngaged {self.state = .listening}
+                }
+            }
+        }
+        localPromptTask=work
+        guard waitUntilDrained else{return}
+        // Cover synthesis as well as playback if the speech worker stalls during farewell.
+        let deadline=ProcessInfo.processInfo.systemUptime+20
+        while active,generation==connection,activePromptPlaybackID==playback,ProcessInfo.processInfo.systemUptime<deadline {
+            try? await Task.sleep(nanoseconds:25_000_000)
+        }
+        if activePromptPlaybackID==playback {cancelLocalPrompt()}
+    }
+    private func windDownAndHangUp(connection:UUID,graceNanoseconds:UInt64) async {
+        let deadline=ProcessInfo.processInfo.systemUptime+Double(graceNanoseconds)/1e9
+        while active,generation==connection,canStopCurrentTurn,ProcessInfo.processInfo.systemUptime<deadline {
+            try? await Task.sleep(nanoseconds:25_000_000)
+        }
+        guard active,generation==connection else{return}
+        windingDown=true
+        _=reserveInputTurn()
+        let abandoned=invalidatePendingInput()
+        await interrupt(sendCancel:true)
+        await deleteInputItems(abandoned,connection:connection)
+        guard active,generation==connection else{return}
+        let farewell="今天我们聊了好多啦，先夹好小书签，去喝口水、看看远处休息一下吧。"
+        onProtocolEvent?("session_wind_down")
+        if VoiceStyle.speaker(voice) != nil,teacherSpeech != nil {
+            let itemID=RealtimeItemID.make("bye")
+            onAssistantText?(itemID,farewell,nil,nil,[])
+            await speakLocalPrompt(farewell,waitUntilDrained:true)
+        }
+        guard active,generation==connection else{return}
+        notice="这一段聊了好多，休息一下再接着讲吧。"
+        hangUp()
+    }
+    private func requiresOutputReview(_ text:String) -> Bool {
+        Safety.containsContactDetails(text) || Safety.isRisk(text) || Safety.containsAdultHandoff(text) ||
+        Safety.hasPhotoUploadHallucination(user:lastUserText, reply:text, hasScene:toolkit?.selectedScene != nil)
+    }
+    private func assessVoice(_ context:[String:Any], scope:SafetyReviewScope, fallback:SafetyDecision) async -> SafetyDecision {
+        guard let judge=safetyJudge else { return fallback }
+        do {
+            try store.recordCloudOperation()
+            let assessment=try await judge.assessSafety(jsonString(context),scope:scope)
+            try store.account(input:assessment.inputTokens,output:assessment.outputTokens)
+            return assessment.decision
+        } catch { return fallback }
+    }
+    private func outputReplacement(_ text:String) async -> String? {
+        if Safety.containsContactDetails(text) { return Safety.redirectReply }
+        if Safety.hasPhotoUploadHallucination(user:lastUserText,reply:text,hasScene:toolkit?.selectedScene != nil) { return Safety.photoUploadReply }
+        guard Safety.isRisk(text) || Safety.containsAdultHandoff(text) else { return nil }
+        let id=UUID(); outputSafetyID=id
+        defer { if outputSafetyID==id { outputSafetyID=nil } }
+        let decision=await assessVoice(["userMessage":lastUserText,"recentDialogue":Array(history.suffix(4)),"proposal":["reply":text]],scope:.assistantOutput,fallback:.trustedAdult)
+        switch decision {
+        case .allow: return nil
+        case .redirect: return Safety.redirectReply
+        case .trustedAdult: return "如果你现在有危险，请马上告诉身边可信任的大人。"
+        }
+    }
+    private func resetReviewedOutput() {
+        outputSafetyID=nil
+        cloudSpeech.removeAll()
+        publishedDrafts.removeAll()
+    }
+    private func playApprovedCloudAudio(_ itemID:String) {
+        guard var item=cloudSpeech[itemID], item.approved else { return }
+        let pcm=item.pcm, ended=item.audioEnded
+        item.pcm=Data(); item.audioEnded=false
+        cloudSpeech[itemID]=item  // The audio backend can report a drain synchronously.
+        if !pcm.isEmpty {
+            currentAudioID=itemID; activePlaybackID=itemID; outputFrames+=pcm.count/2
+            audio.beginOutput(itemID:itemID)
+            if outputSuspended { audio.pauseOutput() }
+            audio.enqueue(pcm);onAudio?(pcm);state=outputSuspended ? .listening : .speaking
+        }
+        if ended && activePlaybackID==itemID { audio.outputEnded() }
+    }
+    private func saveHeardBookmark(_ bookmark:Story) {
+        guard revision==store.revision else {return}
+        do {
+            let expected=spokenWrite?.after ?? booksAtTurnStart[bookmark.id]
+            if expected?.summary==bookmark.summary && expected?.title==bookmark.title { return }
+            var receipt: StoryWrite?
+            try store.transaction {
+                guard try store.stories().first(where:{$0.id==bookmark.id}) == expected else { return }
+                receipt=try store.saveStory(bookmark)
+            }
+            guard let write=receipt else { return }
+            lastVoiceInput?.record(write);spokenWrite=write
+            storySession.current=bookmark;activeStory=bookmark.id
+            onStoryCheckpointAdjusted?()
+        } catch { fail(error.localizedDescription) }
+    }
+    private func recordHeardNarration(complete:Bool) {
+        let heard=heardParagraphs.joined(separator:"\n\n")
+        guard !heard.isEmpty else { return }
+        let entry=["role":"assistant","content":heard]
+        if let i=narrationHistoryIndex,history.indices.contains(i) { history[i]=entry }
+        else { history=Array((history+[entry]).suffix(12));narrationHistoryIndex=history.count-1 }
+        if let item=teacherItems.first { onAssistantHeard?(item,heard) }
+        let partial=PartnerReply(reply:heard,suggestions:[])
+        if toolkit?.spokenNarrativeRequested==true, let bookmark=complete ? finalSpokenBookmark : toolkit?.checkpoint(for:partial,partial:true) { saveHeardBookmark(bookmark) }
+    }
+    private func finishInterruptedNarration() {
+        for item in teacherItems { onAssistantInterrupted?(item) }
+        if let item=activePlaybackID, cloudSpeech[item]?.approved == true { onAssistantInterrupted?(item) }
+        finalSpokenBookmark=nil; spokenWrite=nil; narrationHistoryIndex=nil
     }
     private func rememberAssistant(_ item:String,text:String) {
         lastVoiceInput?.assistantItemIDs.insert(item)
@@ -501,8 +732,9 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     }
     /// Invalidate synchronously, before any network cleanup can suspend.
     private func invalidatePendingInput()->[String] {
+        cancelLocalPrompt(); inputSubmissionID=nil
         pendingInputResponse?.cancel();pendingInputResponse=nil
-        localContinuation.reset()
+        localContinuation.reset();lastSpeechStoppedAt=nil
         cancelAllRecognition();cancelIntentReviews()
         let pending=inputTurns.segments.filter{!$0.consumed && (!$0.finished || $0.accepted)}
         for segment in pending {
@@ -534,6 +766,9 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         if !outputEngaged {state = .listening}
         await deleteInputItems(items,connection:connection)
         onProtocolEvent?("input_needs_correction")
+        if active,generation==connection,!muted,!windingDown,!outputEngaged,VoiceStyle.speaker(voice) != nil,teacherSpeech != nil {
+            await speakLocalPrompt("刚才没太听清，可以再跟莉莉说一遍吗？")
+        }
     }
     func cancelPendingInput() async {
         guard active else{return}
@@ -559,8 +794,14 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         let connection=generation,controlToken=UUID(),repair=UUID()
         contextRepairID=repair
         defer{if contextRepairID==repair {finishContextRepair()}}
+        do { try store.undoStoryWrites(input.storyWrites) }
+        catch { notice=error.localizedDescription; return nil }
         lastVoiceInput=nil;latestVoiceInputID=nil
-        history=input.historyBefore;storySession.current=input.storyBefore;storySession.currentPictureID=input.pictureBefore;activeStory=input.storyBefore?.id
+        history=input.historyBefore
+        if let before=input.storyBefore, input.storyWrites[before.id] != nil {
+            storySession.current=(try? store.stories())?.first { $0.id==before.id }
+        } else { storySession.current=input.storyBefore }
+        storySession.currentPictureID=input.pictureBefore;activeStory=storySession.current?.id
         lastUserText=history.last(where:{$0["role"] as? String=="user"})?["content"] as? String ?? ""
         onVoiceInputRetracted?(input.messageID,input.assistantItemIDs)
         await stopCurrentTurn(controlToken:controlToken,preserveHeardContext:false)
@@ -614,11 +855,15 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         // speaker pauses. Do not cancel async work or consume clauses yet.
         if outputEngaged,let item=segments.last?.id {pauseForInput(item)}
         let id=generation
+        let now=ProcessInfo.processInfo.systemUptime
+        let quietAnchor=max(lastSpeechStoppedAt ?? now,localContinuation.lastActivity)
+        let elapsedNS=UInt64(max(0,now-quietAnchor)*1_000_000_000)
+        let remainingDelay=inputCommitDelay>elapsedNS ? inputCommitDelay-elapsedNS : 0
         inputTranscript=text;state = .listening;listeningHint="在听你说"
         pendingInputResponse=Task {[weak self] in
             guard let self else{return}
             do {
-                try await Task.sleep(nanoseconds:self.inputCommitDelay)
+                if remainingDelay>0 {try await Task.sleep(nanoseconds:remainingDelay)}
                 let heldAt=ProcessInfo.processInfo.systemUptime
                 while self.localContinuation.remainingQuietTime(self.inputCommitDelay)>0 {
                     guard !Task.isCancelled,self.generation==id,self.active,!self.muted else{return}
@@ -638,22 +883,25 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         let attempt=generation
         await waitForContextRepair()
         guard generation==attempt else{return}
-        guard active,!muted,!inputNeedsCorrection,pendingFinalIntents.isEmpty else{return}
+        guard active,!muted,!windingDown,!inputNeedsCorrection,pendingFinalIntents.isEmpty else{return}
         guard let segments=inputTurns.consumeReady() else{continueAtBoundaryIfReady();return}
         let text=VoiceTurns.join(segments),stop=VoiceTurns.isStopRequest(segments.last?.text ?? "") || segments.last.map{finalIntents[$0.id] == .stop} == true
-        let inputID=finalRecognizer == nil ? segments.first!.id : RealtimeItemID.make("voice")
-        let correction=VoiceInputCorrection(messageID:inputID,text:text,serverItemIDs:finalRecognizer == nil ? segments.map(\.id) : [inputID],historyBefore:history,storyBefore:storySession.current,pictureBefore:storySession.currentPictureID)
-        if !stop,StoryIntent.startsNewStory(text) {storySession.reset();activeStory=nil}
-        startTurn(text:text,inputID:activeInputID)
-        let connection=generation,turn=turnID
+        let turn=reserveInputTurn(), connection=generation
+        defer { if inputSubmissionID==turn { inputSubmissionID=nil } }
         await interrupt(sendCancel:true)
-        guard active,generation==connection,turnID==turn else{return}
-        if finalRecognizer != nil {
-            for segment in segments {
-                try await wire.send(["type":"conversation.item.delete","item_id":segment.id])
-                discardedInputs.insert(segment.id)
-                guard active,generation==connection,turnID==turn else{return}
-            }
+        let protected=Safety.shouldProtectUserInput(text), risk=Safety.isRisk(text)
+        let replaceAudio=finalRecognizer != nil || protected || risk
+        let rawIDs=segments.map(\.id)
+        if replaceAudio {
+            try await removeServerItems(rawIDs, connection:connection)
+        }
+        guard active,!muted,!windingDown,generation==connection,turnID==turn,inputSubmissionID==turn else{return}
+        guard try await approveInput(text, turn:turn, spoken:true) else {return}
+        let inputID=replaceAudio ? RealtimeItemID.make("voice") : segments.first!.id
+        let correction=VoiceInputCorrection(messageID:inputID,text:text,serverItemIDs:replaceAudio ? [inputID] : rawIDs,historyBefore:history,storyBefore:storySession.current,pictureBefore:storySession.currentPictureID)
+        if !stop,StoryIntent.startsNewStory(text) {storySession.reset();activeStory=nil}
+        try startTurn(text:text,inputID:activeInputID)
+        if replaceAudio {
             try await wire.send(["type":"conversation.item.create","item":["id":inputID,"type":"message","role":"user","content":[["type":"input_text","text":text]]]])
             guard active,generation==connection,turnID==turn else{return}
             onProtocolEvent?("verified_text_committed")
@@ -693,6 +941,12 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         latestIntentText[item]=text
         if final {cancelIntentReview(item);pendingFinalIntents.insert(item)}
         let earlier=inputTurns.earlierInTurn(before:item)
+        // Both preview and final intent classification may call a separate model.
+        // Route protected fragments locally, including disclosures split across segments.
+        if Safety.shouldProtectUserInput(text) || Safety.shouldProtectUserInput(earlier+text) || Safety.isRisk(earlier+text) {
+            if final {await applyIntent(.listen,item:item,text:text,final:true,connection:connection)}
+            return
+        }
         var quick=VoiceTurnPolicy.quickIntent(text,context:context,final:final,semanticAddress:intentJudge != nil)
         if final,quick != .stop,inputTurns.hasUnfinished(before:item) {
             deferredFinalInputs.insert(item);return
@@ -769,34 +1023,67 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
         try? await respondToReadyInput()
     }
     func sendSyntheticAudio(_ data: Data) async throws {
-        guard active, state != .connecting else { throw PartnerError.message("通话尚未接通。") }
+        guard active, state != .connecting, !windingDown else { throw PartnerError.message("这通电话暂时不能接收音频。") }
         localContinuation.observe(data)
         try await wire.send(["type": "input_audio_buffer.append", "audio": data.base64EncodedString()])
         audioTimeline.append(data)
     }
-    func sendText(_ text: String, newStory: Bool = false) async throws {
-        guard !Safety.shouldProtectUserInput(text) else { throw PartnerError.message(Safety.privateReply) }
+    private func reserveInputTurn() -> UUID {
+        turnID=UUID();inputSubmissionID=turnID;outputSafetyID=nil
+        toolWork?.cancel();toolWork=nil;artworkStatus="";artworkNarration=false
+        return turnID
+    }
+    private func removeServerItems(_ ids:[String],connection:UUID) async throws {
+        for id in ids where !discardedInputs.contains(id) {
+            guard active,generation==connection else{throw CancellationError()}
+            try await wire.send(["type":"conversation.item.delete","item_id":id])
+            discardedInputs.insert(id)
+        }
+    }
+    private func approveInput(_ text:String, turn:UUID, spoken:Bool, onBlocked:(()->Void)?=nil) async throws -> Bool {
+        let connection=generation
+        let reply:String, event:String
+        if Safety.shouldProtectUserInput(text) { reply=Safety.privateReply; event="voice_input_privacy_protected" }
+        else if Safety.isRisk(text) {
+            let decision=await assessVoice(["currentUserMessage":text,"recentDialogue":Array(history.suffix(4))],scope:.userInput,fallback:.trustedAdult)
+            guard active, !windingDown, generation==connection, turnID==turn, inputSubmissionID==turn, !spoken || !muted else { throw CancellationError() }
+            if decision == .allow { return true }
+            reply=decision == .redirect ? Safety.redirectReply : Safety.riskReply;event="voice_input_safety_"+decision.rawValue
+        } else { return true }
+        onBlocked?()
+        inputTranscript="";listeningHint=reply;state = .listening
+        onAssistantText?(RealtimeItemID.make("safe"),reply,nil,nil,[])
+        onProtocolEvent?(event)
+        if VoiceStyle.speaker(voice) != nil { await speakLocalPrompt(reply) }
+        return false
+    }
+    func sendText(_ text:String, newStory:Bool=false, onSubmission:((Bool)->Void)?=nil) async throws {
         let attempt=generation
         await waitForContextRepair()
         guard generation==attempt else{throw CancellationError()}
-        guard active, state != .connecting else { throw PartnerError.message("电话还在连接中。") }
+        guard active, state != .connecting, !windingDown else { throw PartnerError.message("这通电话暂时不能发送，请把文字留在输入框。") }
         let abandoned=invalidatePendingInput()
-        lastVoiceInput=nil;latestVoiceInputID=nil
-        if newStory || StoryIntent.startsNewStory(text) { activeStory = nil; storySession.reset() }
-        startTurn(text: text, inputID: "typed")
-        let connection=generation,turn=turnID
+        let connection=generation,turn=reserveInputTurn()
+        defer { if inputSubmissionID==turn { inputSubmissionID=nil } }
         await interrupt(sendCancel:true)
-        guard active,generation==connection,turnID==turn else{throw CancellationError()}
+        guard active,!windingDown,generation==connection,turnID==turn,inputSubmissionID==turn else{throw CancellationError()}
         await deleteInputItems(abandoned,connection:connection)
-        guard active,generation==connection,turnID==turn else{throw CancellationError()}
+        guard active,!windingDown,generation==connection,turnID==turn,inputSubmissionID==turn else{throw CancellationError()}
+        lastVoiceInput=nil;latestVoiceInputID=nil
+        guard try await approveInput(text,turn:turn,spoken:false,onBlocked:{onSubmission?(false)}) else {return}
+        if newStory || StoryIntent.startsNewStory(text) { activeStory=nil; storySession.reset() }
+        try startTurn(text:text,inputID:"typed")
         try await wire.send(["type": "conversation.item.create", "item": ["type": "message", "role": "user", "content": [["type": "input_text", "text": newStory ? "我们开始一个全新的故事，选题是：" + text + "。先讲一个短开头，让我接着编。" : text]]]])
+        guard active,generation==connection,turnID==turn else{throw CancellationError()}
+        onSubmission?(true)
         state = .thinking;try await createResponse()
     }
-    private func startTurn(text: String, inputID: String? = nil) {
+    private func startTurn(text: String, inputID: String? = nil) throws {
         toolWork?.cancel(); toolWork = nil; artworkNarration = false
-        turnID = UUID(); activeInputID = inputID
+        activeInputID = inputID
         lastUserText = text; toolCount = 0; toolRounds = 0; artworkStatus = ""
-        toolkit = try? PartnerTools(store: store, text: text, activeStory: activeStory, session: storySession, history: history, illustrator: illustrator)
+        booksAtTurnStart=Dictionary(uniqueKeysWithValues:try store.stories().map { ($0.id,$0) })
+        toolkit = try PartnerTools(store: store, text: text, activeStory: activeStory, session: storySession, history: history, illustrator: illustrator)
         history = Array((history + [["role":"user", "content":text]]).suffix(12))
         let connection = generation, turn = turnID
         toolkit?.onActivity = { [weak self] value in
@@ -806,9 +1093,11 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
     }
     private func interrupt(sendCancel: Bool,preserveHeardContext:Bool=true) async {
         let connection = generation,interruptedTurn=turnID,wasSuspended=outputSuspended
+        cancelLocalPrompt()
         cancelIntentReviews()
         let localItems=teacherItems,heardText=heardParagraphs.joined(separator:"\n\n")
-        for item in localItems {onAssistantInterrupted?(item)}
+        finishInterruptedNarration();resetReviewedOutput()
+        streamedResponseID=nil;streamedParagraphCount=0
         if let item=currentAudioID,!localItems.contains(item) {onAssistantInterrupted?(item)}
         teacherItems=[];teacherTask?.cancel();teacherTask=nil
         pendingInputResponse?.cancel();pendingInputResponse=nil
@@ -849,11 +1138,28 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
                 guard state == .connecting else { return }
                 connectionTimeout?.cancel(); connectionTimeout = nil
                 state = .listening
+                let hadStartupSpeech = !startupAudio.isEmpty && LocalSpeechContinuation.containsSpeech(startupAudio)
                 if !startupAudio.isEmpty {let buffered=startupAudio;startupAudio=Data();enqueueMicrophone(buffered)}
-                if greeting {try await createResponse(instructions:"用户刚接通这通电话。只说一句：我在呢，想说什么就说吧。")}
+                if greeting {
+                    if hadStartupSpeech {
+                        onProtocolEvent?("greeting_skipped_for_user_speech")
+                    } else if VoiceStyle.speaker(voice) != nil, teacherSpeech != nil {
+                        let greetingTurn=turnID
+                        let itemID = RealtimeItemID.make("greet")
+                        let text = "我在呢，想说什么就说吧。"
+                        rememberAssistant(itemID, text: text)
+                        try? await wire.send(["type": "conversation.item.create", "item": ["id": itemID, "type": "message", "role": "assistant", "content": [["type": "output_text", "text": text]]]])
+                        guard active,generation==id,turnID==greetingTurn,!muted,!windingDown,!hasPendingVoiceInput,inputSubmissionID==nil else{return}
+                        onAssistantText?(itemID, text, nil, nil, [])
+                        await speakLocalPrompt(text, cacheKey: "greeting")
+                    } else {
+                        try await createResponse(instructions:"用户刚接通这通电话。只说一句：我在呢，想说什么就说吧。")
+                    }
+                }
             case "input_audio_buffer.speech_started":
-                guard !muted,let item=event["item_id"] as? String else{return}
+                guard !muted,!windingDown,let item=event["item_id"] as? String else{return}
                 guard inputTurns.begin(item,overlap:activePlaybackID != nil || Date()<playbackUntil) else{return}
+                cancelLocalPrompt();inputSubmissionID=nil;lastSpeechStoppedAt=nil
                 if let start=event["audio_start_ms"] as? Int {
                     inputAudioStarts[item]=start
                     if start<inputAcceptanceFloorMS {await discardInput(item);return}
@@ -867,6 +1173,7 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
                 guard let item=event["item_id"] as? String ?? activeInputID,
                       inputTurns.isPending(item) || inputTurns.speakingID==item else{return}
                 inputTurns.stop(item)
+                lastSpeechStoppedAt=ProcessInfo.processInfo.systemUptime
                 if let end=event["audio_end_ms"] as? Int {inputAudioEnds[item]=end}
                 if !outputEngaged {state = .thinking}
                 await beginFinalRecognition(item)
@@ -874,6 +1181,7 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
             case "input_audio_buffer.committed":
                 if let item=event["item_id"] as? String {
                     inputTurns.commit(item)
+                    if lastSpeechStoppedAt==nil {lastSpeechStoppedAt=ProcessInfo.processInfo.systemUptime}
                     if muted || uncommittedDiscardedInputs.remove(item) != nil {await discardInput(item)} else {watchTranscription(item)}
                     try await respondToReadyInput()
                 }
@@ -924,31 +1232,62 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
                 }
                 responsePermits.remove(at:permitIndex)
                 try store.recordCloudOperation();responseRunning=true;responseID=responseKey;outputFrames=0
-                responseIsNarrative=StoryIntent.narrative(lastUserText) || (storySession.current != nil && ["继续","继续吧","然后呢","后来呢","往下讲"].contains(VoiceTurns.normalized(lastUserText)))
+                resetReviewedOutput();streamedResponseID=nil;streamedParagraphCount=0
+                responseIsNarrative=toolkit?.spokenNarrativeRequested == true
                 if !outputSuspended,state != .speaking {state = .thinking}
             case "response.output_audio.delta":
                 guard VoiceStyle.speaker(voice)==nil,acceptsOutput(event) else{return}
                 if let encoded = event["delta"] as? String, let pcm = Data(base64Encoded: encoded), let item = event["item_id"] as? String {
                     lastVoiceInput?.assistantItemIDs.insert(item)
-                    currentAudioID = item;activePlaybackID=item;outputFrames += pcm.count/2;audio.beginOutput(itemID:item)
-                    if outputSuspended {audio.pauseOutput()}
-                    audio.enqueue(pcm);onAudio?(pcm);state = outputSuspended ? .listening : .speaking
+                    guard (event["content_index"] as? Int ?? 0)==0 else{return}
+                    cloudSpeech[item,default:CloudSpeechItem()].hasAudio=true
+                    guard cloudSpeech.values.reduce(0,{$0+$1.pcm.count}) + pcm.count <= 16 * 1024 * 1024 else {
+                        throw PartnerError.message("这段语音太长了，请分段再说。")
+                    }
+                    cloudSpeech[item]?.pcm.append(pcm)
+                    playApprovedCloudAudio(item)
                 }
-            case "response.output_audio.done": if VoiceStyle.speaker(voice)==nil,acceptsOutput(event) {audio.outputEnded()}
+            case "response.output_audio.done":
+                if VoiceStyle.speaker(voice)==nil,acceptsOutput(event),let item=event["item_id"] as? String {
+                    cloudSpeech[item,default:CloudSpeechItem()].audioEnded=true;playApprovedCloudAudio(item)
+                }
             case "response.output_audio_transcript.delta", "response.output_text.delta":
                 guard acceptsOutput(event) else{return}
                 if let item = event["item_id"] as? String, let delta = event["delta"] as? String {
-                    draftItemID = item
                     responseTranscripts[item, default: ""] += delta
-                    rememberAssistant(item,text:responseTranscripts[item] ?? "")
-                    if VoiceStyle.speaker(voice)==nil {currentParagraph=responseTranscripts[item] ?? ""}
-                    if !artworkNarration { onAssistantDraft?(item, responseTranscripts[item] ?? "") }
+                    let accumulated = responseTranscripts[item] ?? ""
+                    let safePrefix=PartialReply.completeSentences(in:accumulated)
+                    if !artworkNarration,!safePrefix.isEmpty,publishedDrafts[item] != safePrefix,!requiresOutputReview(safePrefix) {
+                        draftItemID=item;publishedDrafts[item]=safePrefix
+                        rememberAssistant(item,text:safePrefix)
+                        onAssistantDraft?(item,safePrefix)
+                    }
+                    if VoiceStyle.speaker(voice) != nil, teacherSpeech != nil, !artworkNarration, responseIsNarrative, streamedResponseID == nil, accumulated.contains("\n\n") {
+                        let parts = accumulated.components(separatedBy:"\n\n")
+                        let completed = parts.dropLast().map { $0.trimmingCharacters(in:.whitespacesAndNewlines) }.filter { !$0.isEmpty }.flatMap { StoryParagraphs.split($0) }
+                        if !completed.isEmpty, !requiresOutputReview(completed.joined(separator:"\n\n")) {
+                            streamedResponseID = responseID
+                            streamedParagraphCount = completed.count
+                            teacherTask?.cancel()
+                            teacherItems = [item]
+                            narrationID = UUID(); heardParagraphs = []; localNarrating = true; waitingAtBoundary = false
+                            paragraphQueue = completed
+                            onProtocolEvent?("narration_streamed_early")
+                            startNextParagraph()
+                        }
+                    }
                 }
             case "response.output_audio_transcript.done","response.output_text.done":
                 guard acceptsOutput(event) else{return}
                 if let item = event["item_id"] as? String, let text = (event["transcript"] ?? event["text"]) as? String {
-                    responseTranscripts[item] = text;rememberAssistant(item,text:text)
-                    if VoiceStyle.speaker(voice)==nil {currentParagraph=text}
+                    responseTranscripts[item]=text
+                    if type=="response.output_audio_transcript.done",(event["content_index"] as? Int ?? 0)==0 { cloudSpeech[item,default:CloudSpeechItem()].hasFinalTranscript=true }
+                    if !text.isEmpty,!requiresOutputReview(text) {
+                        rememberAssistant(item,text:text)
+                        if type=="response.output_audio_transcript.done", VoiceStyle.speaker(voice)==nil, (event["content_index"] as? Int ?? 0)==0 {
+                            currentParagraph=text;cloudSpeech[item,default:CloudSpeechItem()].approved=true;playApprovedCloudAudio(item)
+                        }
+                    }
                 }
             case "response.done":
                 guard let response = event["response"] as? [String: Any] else { return }
@@ -970,6 +1309,11 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
                 lastVoiceInput?.assistantItemIDs.formUnion(output.compactMap{$0["id"] as? String})
                 let calls = output.filter { $0["type"] as? String == "function_call" }
                 if !calls.isEmpty {
+                    if streamedResponseID == key {
+                        finishInterruptedNarration()
+                        teacherTask?.cancel();teacherTask=nil;teacherItems=[];audio.stopOutput();clearNarration()
+                        streamedResponseID=nil;streamedParagraphCount=0
+                    }
                     let capturedTurn = turnID
                     guard !lastUserText.isEmpty, !artworkNarration, toolRounds < PartnerTools.maximumRounds,
                           toolCount + calls.count <= PartnerTools.maximumCalls else {
@@ -1020,7 +1364,7 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
                         onAssistantText?(itemID,caption,nil,nil,toolkit.activities)
                         onArtwork?(itemID,art)
                         self.toolkit = nil
-                        if VoiceStyle.speaker(voice) != nil { narrateLocally([(itemID,caption)]) }
+                        if VoiceStyle.speaker(voice) != nil { narrateLocally([(itemID,caption)]);narrationHistoryIndex=history.count-1 }
                         else {
                             artworkNarration = true
                             try await createResponse(instructions:"图片已显示给用户。只朗读以下已核实的画面说明，不调用工具，不改编、不追问："+caption)
@@ -1028,26 +1372,89 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
                     } else {try await createResponse()}
                 } else {
                     var narration:[(String,String)]=[]
+                    let completionTurn=turnID
+                    var safetyReplaced=false
                     for item in output where item["type"] as? String == "message" {
                         let itemID = item["id"] as? String ?? UUID().uuidString
                         let content = item["content"] as? [[String: Any]] ?? []
-                        let text = responseTranscripts[itemID] ?? content.compactMap { ($0["transcript"] ?? $0["text"]) as? String }.joined()
+                        let finalText=content.compactMap { ($0["transcript"] ?? $0["text"]) as? String }.joined()
+                        if cloudSpeech[itemID]?.hasAudio == true,finalText.isEmpty,cloudSpeech[itemID]?.hasFinalTranscript != true {
+                            cloudSpeech.removeValue(forKey:itemID)
+                            continue
+                        }
+                        let text=finalText.isEmpty ? responseTranscripts[itemID] ?? "" : finalText
                         if !text.isEmpty, !receivedTranscripts.contains(itemID) {
                             receivedTranscripts.insert(itemID); if draftItemID == itemID { draftItemID = nil }
-                            if let toolkit {
-                                toolkit.prepareCheckpoint(PartnerReply(reply:text,suggestions:[],storyState:toolkit.stagedStories.last?.summary ?? ""))
-                                try toolkit.commit(expectedRevision:revision); activeStory = storySession.current?.id ?? toolkit.selectedStory
+                            let replacement = requiresOutputReview(text) ? await outputReplacement(text) : nil
+                            guard active, generation==id, turnID==completionTurn, responseID==key else {return}
+                            if let replacement {
+                                safetyReplaced = true
+                                teacherTask?.cancel(); teacherTask = nil; clearNarration(); audio.stopOutput()
+                                streamedResponseID = nil; streamedParagraphCount = 0; finalSpokenBookmark=nil; resetReviewedOutput()
+                                toolkit = nil
+                                try await removeServerItems([itemID],connection:id)
+                                guard active, generation==id, turnID==completionTurn, responseID==key else { return }
+                                let safeID = RealtimeItemID.make("safe")
+                                // Keep the approved replacement in the server conversation as well.
+                                lastVoiceInput?.assistantItemIDs.insert(safeID)
+                                try await wire.send(["type":"conversation.item.create","item":["id":safeID,"type":"message","role":"assistant","content":[["type":"output_text","text":replacement]]]])
+                                guard active,generation==id,turnID==completionTurn,responseID==key else{return}
+                                history = Array((history + [["role":"assistant", "content":replacement]]).suffix(12))
+                                onAssistantText?(itemID, replacement, nil, nil, [])
+                                onProtocolEvent?("voice_output_safety_replaced")
+                                if VoiceStyle.speaker(voice) != nil, teacherSpeech != nil { await speakLocalPrompt(replacement) }
+                                else { state = .listening }
+                                continue
                             }
-                            history = Array((history + [["role":"assistant", "content":text]]).suffix(12))
+                            let local=VoiceStyle.speaker(voice) != nil
+                            let hasAudio=cloudSpeech[itemID]?.hasAudio == true
+                            if let toolkit {
+                                let reply=PartnerReply(reply:text,suggestions:[],storyState:toolkit.stagedStories.last?.summary ?? "")
+                                let isStory=toolkit.spokenNarrativeRequested
+                                if !isStory { toolkit.stagedStories.removeAll() }
+                                let bookmark=isStory ? toolkit.checkpoint(for:reply) : nil
+                                let deferStory=(local || hasAudio) && bookmark != nil
+                                if deferStory { finalSpokenBookmark=bookmark }
+                                else if isStory { toolkit.prepareCheckpoint(reply) }
+                                let writes=try toolkit.commit(expectedRevision:revision,deferSpokenStory:deferStory)
+                                for write in writes {lastVoiceInput?.record(write)}
+                                if !deferStory {activeStory=storySession.current?.id ?? toolkit.selectedStory}
+                            }
+                            if !local && !hasAudio && !artworkNarration {
+                                history=Array((history+[["role":"assistant","content":text]]).suffix(12))
+                            }
+                            if hasAudio {
+                                responseTranscripts[itemID]=text
+                                if cloudSpeech[itemID]?.drained == true,let bookmark=finalSpokenBookmark {saveHeardBookmark(bookmark);finalSpokenBookmark=nil}
+                                cloudSpeech[itemID]?.approved=true;cloudSpeech[itemID]?.audioEnded=true;playApprovedCloudAudio(itemID)
+                            }
                             if !artworkNarration { onAssistantText?(itemID, text, toolkit?.selectedScene, toolkit?.selectedWord, toolkit?.activities ?? []) }
                             if let art = toolkit?.selectedArtwork { onArtwork?(itemID,art) }
                             narration.append((itemID,text))
                         }
                     }
                     artworkNarration = false
-                    if VoiceStyle.speaker(voice) != nil,!narration.isEmpty {narrateLocally(narration)}
+                    if safetyReplaced { return }
+                    if VoiceStyle.speaker(voice) != nil,!narration.isEmpty {
+                        let fullText = narration.map(\.1).joined(separator:"\n\n")
+                        if let toolkit, toolkit.spokenNarrativeRequested {
+                            finalSpokenBookmark=toolkit.checkpoint(for:PartnerReply(reply:fullText,suggestions:[],storyState:toolkit.stagedStories.last?.summary ?? ""))
+                        }
+                        if streamedResponseID == key {
+                            teacherItems = narration.map(\.0)
+                            let allParagraphs = StoryParagraphs.split(fullText)
+                            if allParagraphs.count > streamedParagraphCount {
+                                paragraphQueue.append(contentsOf: allParagraphs.dropFirst(streamedParagraphCount))
+                            }
+                            streamedResponseID = nil; streamedParagraphCount = 0
+                            if waitingAtBoundary && paragraphQueue.isEmpty { recordHeardNarration(complete:true) }
+                            continueAtBoundaryIfReady()
+                        } else {
+                            narrateLocally(narration)
+                        }
+                    }
                     else {
-                        audio.outputEnded()
+                        if activePlaybackID==nil {audio.outputEnded()}
                         if activePlaybackID==nil {state = .listening;responseIsNarrative=false;try await respondToReadyInput()}
                     }
                 }
@@ -1063,5 +1470,6 @@ enum PhoneState: String { case ended, connecting, listening, thinking, speaking 
             }
         } catch { if generation == id,!(error is CancellationError) { fail(error.localizedDescription) } }
     }
+    func valueForTestingSavedStories() throws -> [Story] { try store.stories() }
     private func fail(_ text: String) { notice = text; hangUp() }
 }

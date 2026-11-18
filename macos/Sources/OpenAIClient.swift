@@ -10,6 +10,11 @@ protocol PartnerModel {
 protocol StreamingPartnerModel: PartnerModel {
     func respondStreaming(input: [[String: Any]], instructions: String, tools: [[String: Any]], allowTools: Bool, onReply: @escaping @MainActor (String) async throws -> Void) async throws -> ModelOutput
 }
+@MainActor protocol VoiceSafetyJudging: AnyObject {
+    func assessSafety(_ text: String, scope: SafetyReviewScope) async throws -> SafetyAssessment
+}
+extension OpenAIClient: VoiceSafetyJudging {}
+
 final class OpenAIClient: StreamingPartnerModel, StoryIllustratingModel {
     private let key: String
     private let session: URLSession
