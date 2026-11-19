@@ -34,7 +34,7 @@ struct ToyCard: ViewModifier {
     func body(content: Content) -> some View {
         content.background {
             RoundedRectangle(cornerRadius: radius).fill(fill)
-                .overlay(RoundedRectangle(cornerRadius: radius).fill(LinearGradient(colors: [.white.opacity(0.30), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)))
+                .overlay(RoundedRectangle(cornerRadius: radius).fill(LinearGradient(colors: [.white.opacity(0.16), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)))
                 .shadow(color: edge.opacity(0.16), radius: 6, x: 0, y: 3)
         }
             .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(edge.opacity(0.75), lineWidth: 1.2))
@@ -78,6 +78,7 @@ struct MainView:View {
     @ObservedObject var model:AppModel
     @Environment(\.openWindow) private var openWindow
     @State private var deletionCandidate:ConversationItem?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var conversation:[ChatMessage] {model.messages.filter{$0.source != "welcome"}}
     var body:some View {
         HStack(spacing:0) {
@@ -108,10 +109,11 @@ struct MainView:View {
                         ForEach(conversation) {message in
                             let isLatestAssistant = !message.isUser && message.id == conversation.last?.id
                             MessageView(message:message,onRead:message.isStreaming || model.inCall || message.isRetracted ? nil : {model.voice.speak(message.text)},onEdit:model.canCorrectVoice(message) ? {model.editVoiceInput(message.externalID)} : nil,onRetry:model.canCorrectVoice(message) ? {model.retryVoiceInput(message.externalID)} : nil,onSelectSuggestion:isLatestAssistant && !model.busy && !model.inCall && !message.isStreaming && !message.isRetracted ? {model.chooseSuggestion($0)} : nil)
+                                .modifier(BubbleEntrance(isUser:message.isUser,createdAt:message.createdAt,reduceMotion:reduceMotion))
                                 .id(message.id)
                         }
                         if (model.busy && !conversation.contains(where:{$0.isStreaming})) || !model.artworkActivity.isEmpty {
-                            HStack(spacing:10) {ProgressView().controlSize(.small);Text(!model.artworkActivity.isEmpty ? model.artworkActivity : model.activity.isEmpty ? "莉莉在想…" : model.activity).font(.system(size:16)).foregroundStyle(Color.quiet)}.padding(.vertical,12)
+                            ThinkingBubble(text:!model.artworkActivity.isEmpty ? model.artworkActivity : model.activity.isEmpty ? "莉莉在想…" : model.activity)
                         }
                         Color.clear.frame(height:1).id("end")
                     }.padding(.horizontal,28).padding(.vertical,20).frame(maxWidth:820).frame(maxWidth:.infinity)
@@ -122,42 +124,52 @@ struct MainView:View {
                 .onChange(of:model.messages.last?.artwork?.id) {_,_ in proxy.scrollTo("end",anchor:.bottom)}
             }
             composer.frame(maxWidth:820).frame(maxWidth:.infinity)
-        }.frame(maxWidth:.infinity,maxHeight:.infinity)
+        }.frame(maxWidth:.infinity,maxHeight:.infinity).background(StorySkyBackdrop())
     }
     private var sidebar:some View {
         VStack(alignment:.leading,spacing:18) {
-            HStack(spacing:8) {
-                UnicornPicture().frame(width:28,height:34)
-                Text("小小故事屋").font(.system(size:18,weight:.semibold,design:.rounded))
-            }.padding(.top,2).padding(.bottom,4)
+            HStack(spacing:9) {
+                LilyAvatar(size:38)
+                Text("小小故事屋").font(.system(size:19,weight:.bold,design:.rounded))
+                    .foregroundStyle(LinearGradient(colors:[Color.sage,Color.lilyPink],startPoint:.leading,endPoint:.trailing))
+            }.padding(.top,2).padding(.bottom,2)
             Button {model.newConversation()} label:{
-                Label("新对话",systemImage:"square.and.pencil").font(.system(size:16,weight:.semibold,design:.rounded))
-                    .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,12).padding(.vertical,12)
-                    .background(.white.opacity(0.85),in:RoundedRectangle(cornerRadius:12))
-                    .overlay(RoundedRectangle(cornerRadius:12).stroke(Color.lilacEdge.opacity(0.3)))
-            }.buttonStyle(StoryButtonStyle()).disabled(model.inCall).opacity(model.inCall ? 0.5 : 1)
+                HStack(spacing:9) {
+                    Image(systemName:"plus").font(.system(size:14,weight:.heavy)).frame(width:26,height:26).background(.white.opacity(0.28),in:Circle())
+                    Text("新对话").font(.system(size:17,weight:.bold,design:.rounded))
+                    Spacer(minLength:0)
+                    Image(systemName:"sparkles").font(.system(size:14,weight:.semibold)).opacity(0.85)
+                }.foregroundStyle(.white)
+                    .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,12).padding(.vertical,11)
+                    .background(lilyGradient,in:RoundedRectangle(cornerRadius:16))
+                    .overlay(RoundedRectangle(cornerRadius:16).strokeBorder(.white.opacity(0.35)))
+                    .shadow(color:Color.sage.opacity(0.28),radius:7,x:0,y:4)
+            }.buttonStyle(StoryButtonStyle()).hoverLift().disabled(model.inCall).opacity(model.inCall ? 0.5 : 1)
             VStack(alignment:.leading,spacing:9) {
                 Text("会话").font(.system(size:15,weight:.semibold)).foregroundStyle(Color.quiet).padding(.horizontal,4)
                 ScrollView {
                     VStack(spacing:4) {
                         ForEach(model.conversations,id:\.navigationID) {item in
                             let selected=model.selectedConversationID == item.id
+                            let tint=PlayfulTint.badge(for:item.navigationID)
                             HStack(spacing:0) {
                                 Button {model.selectConversation(item.id)} label:{
-                                  HStack(alignment:.top,spacing:9) {
+                                  HStack(alignment:.top,spacing:10) {
                                     Group {
                                         if item.isGenerating {ProgressView().controlSize(.small)}
-                                        else if item.hasError {Image(systemName:"exclamationmark.circle").foregroundStyle(Color(red:0.72,green:0.35,blue:0.14))}
-                                        else {Image(systemName:item.storyID == nil ? (selected ? "bubble.left.fill" : "bubble.left") : (selected ? "book.closed.fill" : "book.closed"))}
-                                    }.font(.system(size:14)).frame(width:17).padding(.top,2)
+                                        else if item.hasError {Image(systemName:"exclamationmark").foregroundStyle(Color(red:0.72,green:0.35,blue:0.14))}
+                                        else {Image(systemName:item.storyID == nil ? "bubble.left.fill" : "book.closed.fill").foregroundStyle(tint.edge)}
+                                    }.font(.system(size:13,weight:.bold)).frame(width:30,height:30)
+                                        .background(Circle().fill(item.hasError ? Color.peach : tint.fill.opacity(selected ? 1 : 0.8)))
+                                        .overlay(Circle().strokeBorder(.white.opacity(0.9),lineWidth:1.5))
                                     VStack(alignment:.leading,spacing:4) {
                                         Text(item.title).font(.system(size:15,weight:selected ? .semibold : .medium)).lineLimit(2).multilineTextAlignment(.leading)
                                         Text(ConversationLabels.timestamp(item.updatedAt)).font(.system(size:11)).monospacedDigit().foregroundStyle(Color.quiet)
                                             .lineLimit(1).minimumScaleFactor(0.9)
-                                    }
+                                    }.padding(.top,1)
                                     Spacer(minLength:0)
-                                  }.padding(.leading,11).padding(.trailing,3).padding(.vertical,11).frame(maxWidth:.infinity,alignment:.leading)
-                                    .contentShape(RoundedRectangle(cornerRadius:10))
+                                  }.padding(.leading,9).padding(.trailing,3).padding(.vertical,9).frame(maxWidth:.infinity,alignment:.leading)
+                                    .contentShape(RoundedRectangle(cornerRadius:14))
                                 }.buttonStyle(StoryButtonStyle()).disabled(model.inCall && !selected).opacity(model.inCall && !selected ? 0.5 : 1)
                                 .accessibilityAddTraits(selected ? [.isSelected] : [])
                                 .accessibilityLabel(item.title+"，"+ConversationLabels.timestamp(item.updatedAt,full:true))
@@ -172,9 +184,10 @@ struct MainView:View {
                                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().padding(.trailing,3)
                                     .accessibilityLabel("更多操作，"+item.title).help("更多操作")
                             }.foregroundStyle(selected ? Color.sage : Color.ink)
-                                .background(selected ? Color.sage.opacity(0.13) : .clear,in:RoundedRectangle(cornerRadius:10))
-                                .overlay(RoundedRectangle(cornerRadius:10).strokeBorder(selected ? Color.sage.opacity(0.28) : .clear))
-                                .overlay(alignment:.leading) {if selected {Capsule().fill(Color.sage).frame(width:3,height:24).padding(.leading,1)}}
+                                .background(selected ? Color.card : .clear,in:RoundedRectangle(cornerRadius:14))
+                                .overlay(RoundedRectangle(cornerRadius:14).strokeBorder(selected ? Color.sage.opacity(0.35) : .clear,lineWidth:1.2))
+                                .shadow(color:selected ? Color.sage.opacity(0.14) : .clear,radius:6,x:0,y:3)
+                                .overlay(alignment:.leading) {if selected {Capsule().fill(lilyGradient).frame(width:4,height:26).padding(.leading,1)}}
                                 .contextMenu {Button(role:.destructive) {deletionCandidate=item} label:{Label("删除对话…",systemImage:"trash")}}
                         }
                     }
@@ -189,11 +202,12 @@ struct MainView:View {
                     Spacer(minLength:0)
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(10)
             }.buttonStyle(.plain).accessibilityValue(model.pendingCount > 0 ? "\(model.pendingCount)条待确认记忆" : "")
-        }.padding(16).frame(width:236).frame(maxHeight:.infinity,alignment:.top).background(Color.sidebarPaper.opacity(0.28))
+        }.padding(16).frame(width:236).frame(maxHeight:.infinity,alignment:.top)
+            .background(LinearGradient(colors:[Color(PlayfulSurfaces.sidebarTop),Color(PlayfulSurfaces.sidebarMiddle),Color(PlayfulSurfaces.sidebarBottom)],startPoint:.top,endPoint:.bottom))
     }
     private var header:some View {
-        HStack(spacing:10) {
-            UnicornPicture().frame(width:36,height:40)
+        HStack(spacing:12) {
+            LilyAvatar(size:44)
             if model.isConversationStarted {
                 VStack(alignment:.leading,spacing:3) {
                     Text(model.conversationTitle).font(.system(size:20,weight:.semibold,design:.rounded)).lineLimit(1)
@@ -201,11 +215,11 @@ struct MainView:View {
                 }
             } else {
                 Text("莉莉").font(.system(size:22,weight:.semibold,design:.rounded))
-                Text("AI伙伴").font(.system(size:12,weight:.medium)).foregroundStyle(Color.quiet).padding(.horizontal,8).padding(.vertical,4).background(Color.lilac.opacity(0.35),in:Capsule())
+                Text("AI伙伴").font(.system(size:12,weight:.semibold)).foregroundStyle(Color.sage).padding(.horizontal,9).padding(.vertical,4).background(Color.lilac.opacity(0.7),in:Capsule())
             }
             Spacer()
             if !model.cloudAvailable {Button("连接莉莉"){model.showParent=true}.buttonStyle(.borderedProminent).tint(Color.sage)}
-        }.padding(.horizontal,24).padding(.vertical,14)
+        }.padding(.horizontal,24).padding(.vertical,12).background(Color(PlayfulSurfaces.header).opacity(0.85))
     }
     private var composer:some View {
         VStack(spacing:12) {
@@ -220,14 +234,23 @@ struct OpeningOptions:View {
     @ObservedObject var model:AppModel
     var compact=false
     var body:some View {
-        LazyVGrid(columns:[GridItem(.flexible(),spacing:10),GridItem(.flexible(),spacing:10)],spacing:10) {
+        LazyVGrid(columns:[GridItem(.flexible(),spacing:compact ? 10 : 14),GridItem(.flexible(),spacing:compact ? 10 : 14)],spacing:compact ? 10 : 14) {
             ForEach(OpeningPrompt.allCases) {choice in
+                let tint=choice.tint
                 Button {model.chooseOpening(choice)} label:{
-                    HStack(spacing:10) {Image(systemName:choice.icon).font(.system(size:17));Text(choice.title).font(.system(size:compact ? 15 : 17,weight:.medium,design:.rounded));Spacer(minLength:0)}
-                        .foregroundStyle(Color.ink).padding(.horizontal,14).frame(height:compact ? 40 : 48)
-                        .background(.white.opacity(0.85),in:RoundedRectangle(cornerRadius:13))
-                        .overlay(RoundedRectangle(cornerRadius:13).stroke(Color.lilacEdge.opacity(0.3)))
-                }.buttonStyle(StoryButtonStyle())
+                    HStack(spacing:compact ? 9 : 12) {
+                        Image(systemName:choice.playfulIcon).font(.system(size:compact ? 14 : 19,weight:.bold)).foregroundStyle(.white)
+                            .frame(width:compact ? 28 : 42,height:compact ? 28 : 42)
+                            .background(Circle().fill(LinearGradient(colors:[tint.edge.opacity(0.8),tint.edge],startPoint:.top,endPoint:.bottom)))
+                            .shadow(color:tint.edge.opacity(0.35),radius:3,x:0,y:2)
+                        Text(choice.title).font(.system(size:compact ? 15 : 18,weight:.semibold,design:.rounded))
+                        Spacer(minLength:0)
+                    }
+                        .foregroundStyle(Color.ink).padding(.horizontal,compact ? 10 : 13).frame(height:compact ? 44 : 64)
+                        .background(RoundedRectangle(cornerRadius:compact ? 14 : 20).fill(LinearGradient(colors:[Color.card,tint.fill.opacity(0.75)],startPoint:.topLeading,endPoint:.bottomTrailing)))
+                        .overlay(RoundedRectangle(cornerRadius:compact ? 14 : 20).strokeBorder(tint.edge.opacity(0.45),lineWidth:1.3))
+                        .contentShape(RoundedRectangle(cornerRadius:compact ? 14 : 20))
+                }.buttonStyle(StoryButtonStyle()).hoverLift()
             }
         }.accessibilityElement(children:.contain).accessibilityLabel("开场建议")
     }
@@ -235,12 +258,13 @@ struct OpeningOptions:View {
 struct ConversationWelcome:View {
     @ObservedObject var model:AppModel
     var body:some View {
-        VStack(spacing:18) {
-            UnicornPicture().frame(width:model.entryOrigin == .voice ? 110 : 80,height:model.entryOrigin == .voice ? 118 : 86)
-            Text(model.entryOrigin == .voice ? "莉莉在这里" : "你好，我是莉莉。").font(.system(size:25,weight:.semibold,design:.rounded))
-            if model.entryOrigin == .text {Text("想聊些什么？").font(.system(size:18)).foregroundStyle(Color.quiet)}
-            if model.showsOpeningOptions {OpeningOptions(model:model).frame(maxWidth:410).padding(.top,9)}
-        }.frame(maxWidth:500)
+        let voice=model.entryOrigin == .voice
+        let mode=model.callVisualMode
+        VStack(spacing:16) {
+            LilyStageView(activity:model.inCall ? mode.stageActivity : .idle,level:model.inCall ? model.callVisualLevel : 0,halo:model.inCall ? mode.color : .lilacEdge,size:voice ? 190 : 150,cheerOnAppear:CommandLine.arguments.contains("--verify-launch") && CommandLine.arguments.contains("--sample-lily-cheer"))
+            GreetingBubble(title:PlayfulGreeting.title(hour:Calendar.current.component(.hour,from:Date()),voice:voice),subtitle:PlayfulGreeting.subtitle(voice:voice))
+            if model.showsOpeningOptions {OpeningOptions(model:model).frame(maxWidth:470).padding(.top,12)}
+        }.frame(maxWidth:540)
     }
 }
 struct PhoneButton: View {
@@ -251,12 +275,16 @@ struct PhoneButton: View {
             if compact {
                 CallActivityOrb(mode:model.callVisualMode,level:model.callVisualLevel,size:48,hangupBadge:model.inCall)
             } else {
+                let hangup=Color(red:0.81,green:0.28,blue:0.35)
                 HStack(spacing:9) {
                     Image(systemName:model.inCall ? "phone.down.fill" : "phone.fill").font(.system(size:19,weight:.semibold))
                     Text(model.inCall ? "挂断" : "打电话").font(.system(size:19,weight:.bold,design:.rounded))
-                }.foregroundStyle(.white).frame(height:48).padding(.horizontal,16).background(model.inCall ? Color(red:0.81,green:0.28,blue:0.35) : Color.sage,in:RoundedRectangle(cornerRadius:16))
+                }.foregroundStyle(.white).frame(height:48).padding(.horizontal,18)
+                    .background(model.inCall ? AnyShapeStyle(LinearGradient(colors:[Color(red:0.90,green:0.40,blue:0.45),hangup],startPoint:.top,endPoint:.bottom)) : AnyShapeStyle(lilyGradient),in:RoundedRectangle(cornerRadius:18))
+                    .overlay(RoundedRectangle(cornerRadius:18).strokeBorder(.white.opacity(0.3)))
+                    .shadow(color:(model.inCall ? hangup : Color.sage).opacity(0.32),radius:7,x:0,y:4)
             }
-        }.buttonStyle(.plain).help(model.inCall ? "挂断电话" : "给莉莉打电话")
+        }.buttonStyle(StoryButtonStyle()).help(model.inCall ? "挂断电话" : "给莉莉打电话")
             .accessibilityLabel(model.inCall ? "挂断电话" : "开始通话")
     }
 }
@@ -278,14 +306,15 @@ struct NativeComposer: View {
                     Menu {
                         Button("编一个新故事"){model.preparePrompt("我们编一个全新的故事吧，你先讲一个有趣的开头，我来接着编。")}
                         if model.storySession.current != nil {Button("把这个故事画出来"){model.preparePrompt("把我们刚刚讲的这个故事画出来吧。")}}
-                    } label:{Image(systemName:"plus").font(.system(size:18)).foregroundStyle(Color.quiet).frame(width:28,height:32)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("更多对话动作")
+                    } label:{Image(systemName:"plus").font(.system(size:17,weight:.bold)).foregroundStyle(Color.sage).frame(width:36,height:36)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width:36,height:36).background(Circle().fill(Color.lilac.opacity(0.8))).help("更多对话动作")
                 }
                 TextField("写给莉莉…", text: $model.draft, axis: .vertical).textFieldStyle(.plain).font(.system(size: 18, design: .rounded)).lineLimit(1...3).focused($inputFocused).onSubmit { model.send() }.disabled(model.busy)
                 if voice.speaking || voice.preparing { Button { voice.stopSpeaking() } label: { Label("停一下", systemImage: "speaker.slash.fill").font(.system(size: 17, weight: .medium)) }.buttonStyle(.plain) }
                 if model.busy { Button("停一下") { model.cancel() }.font(.system(size: 18, weight: .semibold)).buttonStyle(.bordered) }
-                else if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Button { model.send() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .bold)).foregroundStyle(.white).frame(width: 48, height: 48).background(Color.sage, in: Circle()) }.buttonStyle(.plain).disabled(model.holdingCallDraft).help(model.phone?.windingDown == true ? "通话结束后可发送" : model.connectingCall ? "接通后发送" : "发送") }
+                else if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { Button { model.send() } label: { Image(systemName: "arrow.up").font(.system(size: 22, weight: .bold)).foregroundStyle(.white).frame(width: 48, height: 48).background(lilyGradient, in: Circle()).shadow(color: Color.sage.opacity(0.32), radius: 6, x: 0, y: 3) }.buttonStyle(StoryButtonStyle()).disabled(model.holdingCallDraft).help(model.phone?.windingDown == true ? "通话结束后可发送" : model.connectingCall ? "接通后发送" : "发送") }
                 PhoneButton(model: model)
-            }.padding(12).toyCard(.white, .lilacEdge.opacity(0.5), radius: 19)
+            }.padding(12).toyCard(.card, .lilacEdge.opacity(0.6), radius: 24)
+                .shadow(color: Color.lilacEdge.opacity(0.18), radius: 12, x: 0, y: 5)
         }.onAppear {inputFocused = !model.inCall}
             .onChange(of:model.inCall) {_,active in if active {inputFocused=false}}
             .onChange(of:model.draft) {_,text in if !text.isEmpty && !model.inCall {inputFocused=true}}
@@ -301,29 +330,36 @@ struct MessageView: View {
         if message.artwork != nil || message.sceneID != nil || message.word != nil || (onSelectSuggestion != nil && !message.suggestions.isEmpty) { return 600 }
         let font = NSFont.systemFont(ofSize: 18, weight: .medium)
         let lineWidth = message.text.components(separatedBy: .newlines).map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
-        return min(message.isUser ? 490 : 700, max(message.isUser ? (onEdit != nil || message.isRetracted ? 220 : 145) : 300, ceil(lineWidth) + 38))
+        return min(message.isUser ? 490 : 700, max(message.isUser ? (onEdit != nil || message.isRetracted ? 220 : 145) : 300, ceil(lineWidth) + 46))
     }
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if message.isUser { Spacer(minLength: 48) }
             VStack(alignment: .leading, spacing: 11) {
                 HStack(spacing: 8) {
-                    if message.isUser { Image(systemName: "face.smiling.fill").font(.system(size: 22)).foregroundStyle(Color(red: 0.72, green: 0.35, blue: 0.14)) }
-                    else { UnicornPicture().frame(width: 28, height: 28).background(.white.opacity(0.6), in: Circle()) }
-                    Text(message.isUser ? "我说" : message.source == "archive" ? "上次讲到" : "莉莉说").font(.system(size: 14, weight: .bold, design: .rounded))
+                    if message.isUser { ChildAvatar(size: 30) }
+                    else { LilyAvatar(size: 34) }
+                    Text(message.isUser ? "我说" : message.source == "archive" ? "上次讲到" : "莉莉说").font(.system(size: 14, weight: .bold, design: .rounded)).foregroundStyle(message.isUser ? Color(red: 0.70, green: 0.38, blue: 0.16) : Color.sage)
                     Spacer()
                     if message.isRetracted {Text("已撤回").font(.system(size:13)).foregroundStyle(Color.quiet)}
                     else if message.isInterrupted {Text("已停止").font(.system(size:13)).foregroundStyle(Color.quiet)}
-                    if !message.isUser, !message.isStreaming, let onRead { Button(action: onRead) { Label("再听", systemImage: "speaker.wave.2.fill").font(.system(size: 16, weight: .medium)).padding(.horizontal, 10).padding(.vertical, 6).background(.white.opacity(0.7), in: Capsule()) }.buttonStyle(.plain) }
+                    if !message.isUser, !message.isStreaming, let onRead { Button(action: onRead) { Label("再听", systemImage: "speaker.wave.2.fill").font(.system(size: 16, weight: .semibold, design: .rounded)).foregroundStyle(Color.sage).padding(.horizontal, 12).padding(.vertical, 6).background(Color.lilac.opacity(0.75), in: Capsule()).overlay(Capsule().strokeBorder(Color.lilacEdge.opacity(0.5))) }.buttonStyle(StoryButtonStyle()).hoverLift() }
                 }
                 if let artwork = message.artwork, let image = NSImage(contentsOf:artwork.url) {
                     VStack(alignment:.leading,spacing:12) {
-                        Image(nsImage:image).resizable().scaledToFit().frame(maxWidth:520).clipShape(RoundedRectangle(cornerRadius:18))
-                        Text("《\(artwork.title)》的配图").font(.system(size:23,weight:.bold,design:.rounded))
+                        Image(nsImage:image).resizable().scaledToFit().frame(maxWidth:520).clipShape(RoundedRectangle(cornerRadius:14))
+                            .padding(8).background(Color.card,in:RoundedRectangle(cornerRadius:20))
+                            .shadow(color:Color.ink.opacity(0.14),radius:10,x:0,y:5)
+                        Label("《\(artwork.title)》的配图",systemImage:"sparkles").font(.system(size:23,weight:.bold,design:.rounded)).labelStyle(PlayfulTitleLabel())
                     }
                 }
                 if let id = message.sceneID, let scene = Scene.all.first(where: { $0.id == id }), let url = scene.url, let image = NSImage(contentsOf: url) {
-                    VStack(alignment: .leading, spacing: 12) { Image(nsImage: image).resizable().scaledToFit().frame(width: min(420, 240 * image.size.width / max(1, image.size.height))).clipShape(RoundedRectangle(cornerRadius: 18)); Text("看图素材 · " + scene.title).font(.system(size: 23, weight: .bold, design: .rounded)) }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Image(nsImage: image).resizable().scaledToFit().frame(width: min(420, 240 * image.size.width / max(1, image.size.height))).clipShape(RoundedRectangle(cornerRadius: 14))
+                            .padding(8).background(Color.card, in: RoundedRectangle(cornerRadius: 20))
+                            .shadow(color: Color.ink.opacity(0.14), radius: 10, x: 0, y: 5)
+                        Label("看图素材 · " + scene.title, systemImage: "photo.fill").font(.system(size: 23, weight: .bold, design: .rounded)).labelStyle(PlayfulTitleLabel())
+                    }
                 }
                 Text(message.text).strikethrough(message.isRetracted).foregroundStyle(message.isRetracted ? Color.quiet : Color.ink).font(.system(size: 18, weight: .regular, design: .rounded)).lineSpacing(5).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if onEdit != nil || onRetry != nil {
@@ -332,24 +368,44 @@ struct MessageView: View {
                         if let onEdit {Button(action:onEdit) {Label("改文字",systemImage:"pencil")} }
                     }.font(.system(size:14,weight:.medium)).buttonStyle(.plain).foregroundStyle(Color.sage).frame(maxWidth:.infinity,alignment:.trailing)
                 }
-                if message.isStreaming { HStack(spacing:5) { ForEach(0..<3) { _ in Circle().fill(Color.sage.opacity(0.5)).frame(width:4,height:4) } }.accessibilityLabel("正在生成") }
+                if message.isStreaming { BouncingDots(color: .sage, size: 6).accessibilityElement().accessibilityLabel("正在生成") }
                 if let word = message.word {
-                    HStack(spacing: 22) { VStack(alignment: .leading, spacing: 7) { Text(word.pinyin).font(.system(size: 18)); Text(word.hanzi).font(.system(size: 34, weight: .bold, design: .rounded)).tracking(4) }; Spacer(); Text(word.english).font(.system(size: 23, weight: .medium, design: .rounded)) }.padding(19).toyCard(.mint, Color.sage.opacity(0.3), radius: 18)
+                    HStack(spacing: 22) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text(word.pinyin).font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(Color.mintEdge)
+                            Text(word.hanzi).font(.system(size: 40, weight: .heavy, design: .rounded)).tracking(5)
+                        }
+                        Spacer()
+                        Text(word.english).font(.system(size: 23, weight: .semibold, design: .rounded)).foregroundStyle(Color.skyDeep)
+                    }.padding(19)
+                        .background(RoundedRectangle(cornerRadius: 20).fill(LinearGradient(colors: [Color.mint, Color.sky.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)))
+                        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.mintEdge.opacity(0.45), lineWidth: 1.3))
                 }
                 if let onSelectSuggestion, !message.suggestions.isEmpty {
-                    HStack(spacing: 8) {
-                        ForEach(message.suggestions, id: \.self) { suggestion in
-                            Button { onSelectSuggestion(suggestion) } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "sparkles").font(.system(size: 12))
-                                    Text(suggestion).font(.system(size: 15, weight: .medium, design: .rounded)).lineLimit(1)
-                                }.foregroundStyle(Color.sage).padding(.horizontal, 12).padding(.vertical, 7).background(Color.softSage.opacity(0.65), in: Capsule()).overlay(Capsule().stroke(Color.lilacEdge.opacity(0.45), lineWidth: 1))
-                            }.buttonStyle(StoryButtonStyle()).accessibilityLabel("后续建议，\(suggestion)")
-                        }
+                    let chips = ForEach(Array(message.suggestions.enumerated()), id: \.offset) { index, suggestion in
+                        let tint = PlayfulTint.suggestions[index % PlayfulTint.suggestions.count]
+                        Button { onSelectSuggestion(suggestion) } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "sparkles").font(.system(size: 13, weight: .bold)).foregroundStyle(tint.edge)
+                                Text(suggestion).font(.system(size: 16, weight: .semibold, design: .rounded)).foregroundStyle(Color.ink).lineLimit(1)
+                            }.padding(.horizontal, 14).padding(.vertical, 8)
+                                .background(Capsule().fill(LinearGradient(colors: [Color.card, tint.fill], startPoint: .top, endPoint: .bottom)))
+                                .overlay(Capsule().strokeBorder(tint.edge.opacity(0.5), lineWidth: 1.2))
+                        }.buttonStyle(StoryButtonStyle()).hoverLift().accessibilityLabel("后续建议，\(suggestion)")
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) { chips }
+                        VStack(alignment: .leading, spacing: 8) { chips }
                     }.padding(.top, 2)
                 }
-            }.padding(.horizontal, 18).padding(.vertical, 15).frame(maxWidth: preferredWidth, alignment: .leading).toyCard(message.isUser ? .peach.opacity(0.6) : .white, message.isUser ? .peachEdge : .lilacEdge.opacity(0.65), radius: 20)
+            }.padding(.horizontal, 18).padding(.vertical, 15).frame(maxWidth: preferredWidth, alignment: .leading)
+                .toyCard(message.isUser ? Color(PlayfulSurfaces.childBubble) : .card, message.isUser ? .peachEdge : .lilacEdge.opacity(0.65), radius: 22)
             if !message.isUser { Spacer(minLength: 40) }
         }.frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
+    }
+}
+struct PlayfulTitleLabel: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) { configuration.icon.foregroundStyle(Color.lemonEdge).font(.system(size: 19, weight: .bold)); configuration.title }
     }
 }

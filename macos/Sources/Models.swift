@@ -90,6 +90,8 @@ struct Scene: Identifiable, Equatable {
 }
 struct ChatMessage: Identifiable {
     let id = UUID()
+    /// Runtime-only; lets the main window pop in fresh bubbles without replaying old ones.
+    let createdAt = Date()
     var isUser: Bool
     var text: String
     var activities: [String] = []

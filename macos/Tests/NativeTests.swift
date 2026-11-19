@@ -850,6 +850,7 @@ func spriteAtlasFixture() throws -> URL {
         cases += backgroundConversationTestCases()
         cases += classicalKnowledgeTestCases()
         cases += conversationToolTestCases()
+        cases += playfulUITestCases()
         for (name, test) in cases { do { try await test(); print("PASS \(name)") } catch { failed += 1; print("FAIL \(name): \(error.localizedDescription)") } }
         print("Native tests: \(cases.count - failed)/\(cases.count) passed")
         if failed > 0 { exit(1) }
