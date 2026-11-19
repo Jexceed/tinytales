@@ -79,6 +79,7 @@ struct MainView:View {
     @Environment(\.openWindow) private var openWindow
     @State private var deletionCandidate:ConversationItem?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var paneHeight:CGFloat = 600
     private var conversation:[ChatMessage] {model.messages.filter{$0.source != "welcome"}}
     var body:some View {
         HStack(spacing:0) {
@@ -103,25 +104,42 @@ struct MainView:View {
             ScrollViewReader {proxy in
                 ScrollView {
                     VStack(alignment:.leading,spacing:18) {
-                        if conversation.isEmpty {
-                            ConversationWelcome(model:model).frame(maxWidth:.infinity).padding(.top,44).padding(.bottom,24)
+                        if conversation.isEmpty || model.showsWelcomeTalkButton {
+                            ConversationWelcome(model:model,compact:paneHeight < PlayfulLayout.compactWelcomeHeight).frame(maxWidth:.infinity).padding(.top,paneHeight < PlayfulLayout.compactWelcomeHeight ? 12 : 44).padding(.bottom,24).id("welcome")
                         }
                         ForEach(conversation) {message in
                             let isLatestAssistant = !message.isUser && message.id == conversation.last?.id
-                            MessageView(message:message,onRead:message.isStreaming || model.inCall || message.isRetracted ? nil : {model.voice.speak(message.text)},onEdit:model.canCorrectVoice(message) ? {model.editVoiceInput(message.externalID)} : nil,onRetry:model.canCorrectVoice(message) ? {model.retryVoiceInput(message.externalID)} : nil,onSelectSuggestion:isLatestAssistant && !model.busy && !model.inCall && !message.isStreaming && !message.isRetracted ? {model.chooseSuggestion($0)} : nil)
+                            MessageView(
+                                message:message,
+                                onRead:message.isStreaming || model.inCall || message.isRetracted ? nil : { model.voice.speak(message.text) },
+                                onEdit:model.canCorrectVoice(message) ? { model.editVoiceInput(message.externalID) } : nil,
+                                onRetry:model.canCorrectVoice(message) ? { model.retryVoiceInput(message.externalID) } : nil,
+                                onSelectSuggestion:isLatestAssistant && !model.busy && !model.inCall && !message.isStreaming && !message.isRetracted ? { model.chooseSuggestion($0) } : nil,
+                                onReadWord:model.canReadWord(in:message) ? { model.readWord(in:message.id) } : nil,
+                                beginArtworkCelebration:model.beginArtworkCelebration
+                            )
                                 .modifier(BubbleEntrance(isUser:message.isUser,createdAt:message.createdAt,reduceMotion:reduceMotion))
                                 .id(message.id)
                         }
                         if (model.busy && !conversation.contains(where:{$0.isStreaming})) || !model.artworkActivity.isEmpty {
-                            ThinkingBubble(text:!model.artworkActivity.isEmpty ? model.artworkActivity : model.activity.isEmpty ? "莉莉在想…" : model.activity)
+                            let waitText = !model.artworkActivity.isEmpty ? model.artworkActivity : model.activity.isEmpty ? "莉莉在想…" : model.activity
+                            if !model.artworkActivity.isEmpty || PaintingStatus.isDrawing(model.activity) {PaintingBubble(text:waitText)}
+                            else {ThinkingBubble(text:waitText)}
                         }
                         Color.clear.frame(height:1).id("end")
                     }.padding(.horizontal,28).padding(.vertical,20).frame(maxWidth:820).frame(maxWidth:.infinity)
                 }
-                .onChange(of:model.selectedConversationID) {_,_ in proxy.scrollTo("end",anchor:.bottom)}
-                .onChange(of:model.messages.count) {_,_ in withAnimation {proxy.scrollTo("end",anchor:.bottom)}}
-                .onChange(of:model.messages.last?.text) {_,_ in proxy.scrollTo("end",anchor:.bottom)}
-                .onChange(of:model.messages.last?.artwork?.id) {_,_ in proxy.scrollTo("end",anchor:.bottom)}
+                .background(GeometryReader {geometry in Color.clear.onAppear {paneHeight=geometry.size.height}.onChange(of:geometry.size.height) {_,height in paneHeight=height}})
+                .onChange(of:model.showsWelcomeTalkButton) { _,visible in
+                    if visible { proxy.scrollTo("welcome",anchor:.top) }
+                }
+                .onChange(of:model.selectedConversationID) {_,_ in
+                    if model.showsWelcomeTalkButton { proxy.scrollTo("welcome",anchor:.top) }
+                    else { proxy.scrollTo("end",anchor:.bottom) }
+                }
+                .onChange(of:model.messages.count) {_,_ in if !model.showsWelcomeTalkButton { withAnimation {proxy.scrollTo("end",anchor:.bottom)} }}
+                .onChange(of:model.messages.last?.text) {_,_ in if !model.showsWelcomeTalkButton { proxy.scrollTo("end",anchor:.bottom) }}
+                .onChange(of:model.messages.last?.artwork?.id) {_,_ in if !model.showsWelcomeTalkButton { proxy.scrollTo("end",anchor:.bottom) }}
             }
             composer.frame(maxWidth:820).frame(maxWidth:.infinity)
         }.frame(maxWidth:.infinity,maxHeight:.infinity).background(StorySkyBackdrop())
@@ -155,13 +173,15 @@ struct MainView:View {
                             HStack(spacing:0) {
                                 Button {model.selectConversation(item.id)} label:{
                                   HStack(alignment:.top,spacing:10) {
+                                    let thumbnail=item.isGenerating || item.hasError ? nil : model.thumbnailURL(for:item).flatMap{ArtworkThumbnails.image(at:$0)}
                                     Group {
                                         if item.isGenerating {ProgressView().controlSize(.small)}
                                         else if item.hasError {Image(systemName:"exclamationmark").foregroundStyle(Color(red:0.72,green:0.35,blue:0.14))}
+                                        else if let thumbnail {Image(nsImage:thumbnail).resizable().scaledToFill().frame(width:34,height:34).clipShape(Circle()).accessibilityHidden(true)}
                                         else {Image(systemName:item.storyID == nil ? "bubble.left.fill" : "book.closed.fill").foregroundStyle(tint.edge)}
-                                    }.font(.system(size:13,weight:.bold)).frame(width:30,height:30)
+                                    }.font(.system(size:13,weight:.bold)).frame(width:34,height:34)
                                         .background(Circle().fill(item.hasError ? Color.peach : tint.fill.opacity(selected ? 1 : 0.8)))
-                                        .overlay(Circle().strokeBorder(.white.opacity(0.9),lineWidth:1.5))
+                                        .overlay(Circle().strokeBorder(thumbnail == nil ? Color.white.opacity(0.9) : tint.edge.opacity(0.8),lineWidth:thumbnail == nil ? 1.5 : 2))
                                     VStack(alignment:.leading,spacing:4) {
                                         Text(item.title).font(.system(size:15,weight:selected ? .semibold : .medium)).lineLimit(2).multilineTextAlignment(.leading)
                                         Text(ConversationLabels.timestamp(item.updatedAt)).font(.system(size:11)).monospacedDigit().foregroundStyle(Color.quiet)
@@ -257,12 +277,15 @@ struct OpeningOptions:View {
 }
 struct ConversationWelcome:View {
     @ObservedObject var model:AppModel
+    /// Short windows shrink the stage so the big talk button always stays above the fold.
+    var compact=false
     var body:some View {
         let voice=model.entryOrigin == .voice
         let mode=model.callVisualMode
-        VStack(spacing:16) {
-            LilyStageView(activity:model.inCall ? mode.stageActivity : .idle,level:model.inCall ? model.callVisualLevel : 0,halo:model.inCall ? mode.color : .lilacEdge,size:voice ? 190 : 150,cheerOnAppear:CommandLine.arguments.contains("--verify-launch") && CommandLine.arguments.contains("--sample-lily-cheer"))
+        VStack(spacing:compact ? 10 : 16) {
+            LilyStageView(activity:model.inCall ? mode.stageActivity : .idle,level:model.inCall ? model.callVisualLevel : 0,halo:model.inCall ? mode.color : .lilacEdge,size:PlayfulLayout.stageSize(voice:voice,compact:compact),cheerOnAppear:CommandLine.arguments.contains("--verify-launch") && CommandLine.arguments.contains("--sample-lily-cheer"))
             GreetingBubble(title:PlayfulGreeting.title(hour:Calendar.current.component(.hour,from:Date()),voice:voice),subtitle:PlayfulGreeting.subtitle(voice:voice))
+            if model.showsWelcomeTalkButton {WelcomeTalkButton(model:model).padding(.top,compact ? 2 : 8)}
             if model.showsOpeningOptions {OpeningOptions(model:model).frame(maxWidth:470).padding(.top,12)}
         }.frame(maxWidth:540)
     }
@@ -326,18 +349,23 @@ struct MessageView: View {
     var onEdit: (() -> Void)? = nil
     var onRetry: (() -> Void)? = nil
     var onSelectSuggestion: ((String) -> Void)? = nil
+    var onReadWord: (() -> Void)? = nil
+    var beginArtworkCelebration: ((StoryArtwork,Bool) -> Date?)? = nil
+    @State private var celebrationStart: Date?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var preferredWidth: CGFloat {
         if message.artwork != nil || message.sceneID != nil || message.word != nil || (onSelectSuggestion != nil && !message.suggestions.isEmpty) { return 600 }
         let font = NSFont.systemFont(ofSize: 18, weight: .medium)
         let lineWidth = message.text.components(separatedBy: .newlines).map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
-        return min(message.isUser ? 490 : 700, max(message.isUser ? (onEdit != nil || message.isRetracted ? 220 : 145) : 300, ceil(lineWidth) + 46))
+        return min(message.isUser ? 490 : 700, max(message.isUser ? (message.isRetracted ? 220 : 145) : 300, ceil(lineWidth) + 46))
     }
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             if message.isUser { Spacer(minLength: 48) }
+            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 5) {
             VStack(alignment: .leading, spacing: 11) {
                 HStack(spacing: 8) {
-                    if message.isUser { ChildAvatar(size: 30) }
+                    if message.isUser { ChildAvatar(size: 34) }
                     else { LilyAvatar(size: 34) }
                     Text(message.isUser ? "我说" : message.source == "archive" ? "上次讲到" : "莉莉说").font(.system(size: 14, weight: .bold, design: .rounded)).foregroundStyle(message.isUser ? Color(red: 0.70, green: 0.38, blue: 0.16) : Color.sage)
                     Spacer()
@@ -350,6 +378,8 @@ struct MessageView: View {
                         Image(nsImage:image).resizable().scaledToFit().frame(maxWidth:520).clipShape(RoundedRectangle(cornerRadius:14))
                             .padding(8).background(Color.card,in:RoundedRectangle(cornerRadius:20))
                             .shadow(color:Color.ink.opacity(0.14),radius:10,x:0,y:5)
+                            .overlay { if !reduceMotion, let celebrationStart { CelebrationBurst(start:celebrationStart) } }
+                            .task(id:artwork.id) { celebrationStart=beginArtworkCelebration?(artwork,reduceMotion) }
                         Label("《\(artwork.title)》的配图",systemImage:"sparkles").font(.system(size:23,weight:.bold,design:.rounded)).labelStyle(PlayfulTitleLabel())
                     }
                 }
@@ -362,24 +392,29 @@ struct MessageView: View {
                     }
                 }
                 Text(message.text).strikethrough(message.isRetracted).foregroundStyle(message.isRetracted ? Color.quiet : Color.ink).font(.system(size: 18, weight: .regular, design: .rounded)).lineSpacing(5).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                if onEdit != nil || onRetry != nil {
-                    HStack(spacing:16) {
-                        if let onRetry {Button(action:onRetry) {Label("重说",systemImage:"arrow.counterclockwise")} }
-                        if let onEdit {Button(action:onEdit) {Label("改文字",systemImage:"pencil")} }
-                    }.font(.system(size:14,weight:.medium)).buttonStyle(.plain).foregroundStyle(Color.sage).frame(maxWidth:.infinity,alignment:.trailing)
-                }
                 if message.isStreaming { BouncingDots(color: .sage, size: 6).accessibilityElement().accessibilityLabel("正在生成") }
                 if let word = message.word {
-                    HStack(spacing: 22) {
+                    let card = HStack(spacing: 22) {
                         VStack(alignment: .leading, spacing: 7) {
                             Text(word.pinyin).font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(Color.mintEdge)
-                            Text(word.hanzi).font(.system(size: 40, weight: .heavy, design: .rounded)).tracking(5)
+                            Text(word.hanzi).font(.system(size: 40, weight: .heavy, design: .rounded)).tracking(5).foregroundStyle(Color.ink)
                         }
                         Spacer()
-                        Text(word.english).font(.system(size: 23, weight: .semibold, design: .rounded)).foregroundStyle(Color.skyDeep)
+                        VStack(alignment: .trailing, spacing: 10) {
+                            if onReadWord != nil {
+                                Image(systemName: "speaker.wave.2.fill").font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
+                                    .frame(width: 40, height: 40).background(Circle().fill(Color.mintEdge))
+                            }
+                            Text(word.english).font(.system(size: 23, weight: .semibold, design: .rounded)).foregroundStyle(Color.skyDeep)
+                        }
                     }.padding(19)
                         .background(RoundedRectangle(cornerRadius: 20).fill(LinearGradient(colors: [Color.mint, Color.sky.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)))
                         .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(Color.mintEdge.opacity(0.45), lineWidth: 1.3))
+                        .contentShape(RoundedRectangle(cornerRadius: 20))
+                    if let onReadWord {
+                        Button(action:onReadWord) { card }.buttonStyle(StoryButtonStyle()).hoverLift()
+                            .help("读一读").accessibilityLabel("读一读，\(word.hanzi)")
+                    } else { card }
                 }
                 if let onSelectSuggestion, !message.suggestions.isEmpty {
                     let chips = ForEach(Array(message.suggestions.enumerated()), id: \.offset) { index, suggestion in
@@ -400,6 +435,14 @@ struct MessageView: View {
                 }
             }.padding(.horizontal, 18).padding(.vertical, 15).frame(maxWidth: preferredWidth, alignment: .leading)
                 .toyCard(message.isUser ? Color(PlayfulSurfaces.childBubble) : .card, message.isUser ? .peachEdge : .lilacEdge.opacity(0.65), radius: 22)
+            // Voice corrections sit under the child's bubble as tidy chips instead of floating inside it.
+            if onEdit != nil || onRetry != nil {
+                HStack(spacing: 5) {
+                    if let onRetry { VoiceFixChip(title: VoiceFixLabels.retry, symbol: "arrow.counterclockwise", emphasis: .primary, action: onRetry) }
+                    if let onEdit { VoiceFixChip(title: VoiceFixLabels.edit, symbol: "pencil", emphasis: .secondary, action: onEdit) }
+                }.padding(.trailing, 4)
+            }
+            }
             if !message.isUser { Spacer(minLength: 40) }
         }.frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
     }

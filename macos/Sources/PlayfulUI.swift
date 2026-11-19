@@ -150,3 +150,94 @@ enum PlayfulSurfaces {
     static var backdrops: [SoftRGB] { [skyTop, skyMiddle, skyBottom, header, sidebarTop, sidebarMiddle, sidebarBottom] }
     static var surfaces: [SoftRGB] { [card, childBubble] }
 }
+
+// MARK: 0.21.0 child-perspective additions
+
+extension StageActivity {
+    /// Status symbol kept on the call avatar so state is not carried by pose alone (P-13).
+    var badgeSymbol: String {
+        switch self {
+        case .idle, .connecting: return "phone.fill"
+        case .listening: return "mic.fill"
+        case .thinking: return "sparkles"
+        case .speaking: return "speaker.wave.2.fill"
+        case .muted: return "mic.slash.fill"
+        }
+    }
+}
+
+/// Recognises Lily's drawing progress lines so the wait can show a painting scene.
+enum PaintingStatus {
+    static let lines: Set<String> = ["莉莉在选画面…", "莉莉在画画…", "莉莉在补好细节…", "快画好啦…"]
+    static func isDrawing(_ activity: String) -> Bool {
+        let text = activity.trimmingCharacters(in: .whitespacesAndNewlines)
+        return lines.contains(text) || text.contains("画画") || text.contains("画面")
+    }
+    static let cycle: TimeInterval = 6
+    static let minimumFill = 0.3
+    /// 0...1 fill of the little canvas; loops while waiting, frozen under reduced motion.
+    static func fill(elapsed: TimeInterval, reduceMotion: Bool) -> Double {
+        guard !reduceMotion else { return 0.6 }
+        // Never fully blank, so the canvas already shows colour the moment drawing starts.
+        let phase = max(0, elapsed).truncatingRemainder(dividingBy: cycle) / cycle
+        return minimumFill + (1 - minimumFill) * (1 - cos(phase * .pi)) / 2
+    }
+}
+
+extension PlayfulMotion {
+    static let celebrationWindow: TimeInterval = 4
+    static let celebrationDuration: TimeInterval = 1.8
+    static let celebrationParticles = 10
+    static func celebrationFrames(start:Date) -> [Date] {
+        let fps = 30.0
+        // Schedule one empty frame after the burst so the last particles disappear.
+        let finalFrame = Int(ceil(celebrationDuration * fps)) + 1
+        return (0...finalFrame).map { start.addingTimeInterval(Double($0) / fps) }
+    }
+    /// Only a picture saved moments ago celebrates; reopening old pictures does not replay.
+    static func celebrates(artworkAge: TimeInterval?, reduceMotion: Bool) -> Bool {
+        guard let artworkAge, !reduceMotion else { return false }
+        return artworkAge >= 0 && artworkAge < celebrationWindow
+    }
+}
+
+struct ArtworkCelebrations {
+    private var seenUntil: [String:Date] = [:]
+
+    mutating func begin(id:String, savedAt:Date?, now:Date, reduceMotion:Bool) -> Date? {
+        seenUntil = seenUntil.filter { $0.value > now }
+        guard let savedAt, PlayfulMotion.celebrates(artworkAge:now.timeIntervalSince(savedAt),reduceMotion:false),
+              seenUntil[id] == nil else { return nil }
+        seenUntil[id] = savedAt.addingTimeInterval(PlayfulMotion.celebrationWindow)
+        return reduceMotion ? nil : now
+    }
+}
+
+extension WordCard {
+    /// What Lily reads when a child taps the word card.
+    var readAloudText: String { hanzi }
+}
+
+/// Welcome layout sizes. In a short window (the 1000×600 minimum) the stage shrinks
+/// so the stage, greeting and big talk button fit above the fold.
+enum PlayfulLayout {
+    static let compactWelcomeHeight: Double = 500
+    static let talkButtonHeight: Double = 68
+    static func stageSize(voice: Bool, compact: Bool) -> Double {
+        compact ? (voice ? 150 : 110) : (voice ? 190 : 150)
+    }
+    /// Approximate height used by stage + greeting + talk button for a given layout.
+    static func welcomeHeadHeight(voice: Bool, compact: Bool) -> Double {
+        let stage = stageSize(voice: voice, compact: compact) * 1.18
+        let greeting: Double = voice ? 70 : 96
+        let spacing: Double = compact ? 10 * 2 + 2 : 16 * 2 + 8
+        let top: Double = compact ? 12 : 44
+        return top + stage + greeting + spacing + talkButtonHeight
+    }
+}
+
+/// Names of the voice-correction entries, shared by the main window, call panel and pet (0.21.2).
+enum VoiceFixLabels {
+    static let retry = "重说"
+    static let edit = "修改"
+}

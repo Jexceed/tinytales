@@ -1,0 +1,9 @@
+{
+  "mode": "built-in image generation (Antigravity image-generator subagent)",
+  "date": "2026-11-19",
+  "purpose": "Child user avatar beside the child's chat bubbles (\"我说\"); original TinyTales artwork matching Lily's plush storybook style. 0.21.2: little girl, replacing the 0.21.1 gender-neutral child at the user's request.",
+  "styleReference": "Brand/story-unicorn.png (style only; the unicorn was not copied)",
+  "postProcessing": "Cropped (60,40)-(900,880) from the 1024x1024 output so both hair buns stay inside a circular crop; resized to 512x512 PNG",
+  "prompt": "Create ONE square avatar illustration (1024x1024) to represent the child user in a Chinese children's storytelling app, shown in a ~30-40px circular avatar opposite the mascot (a cute baby rainbow unicorn in soft velvety plush-clay 3D picture-book style). Match the reference's rendering style, softness, palette and charm; do not copy the unicorn. Subject: a cute little girl about 5 years old, head and shoulders, slight three-quarter turn, face centered for a circular crop with shoulders reaching the bottom edge; big warm dark-brown eyes with highlights, rosy cheeks, small happy open smile, soft round face, dark-brown hair in two little side buns tied with small peach/coral hair ties, short soft fringe, soft peach/coral round-neck top. Sweet and friendly, not glamorous, no makeup, no jewellery, readable at 32px. Flat warm cream-peach background (#FCE6D2-ish). No text, letters, frame, border, watermark, extra characters or props.",
+  "sha256": "686457d5a135ab86cf5a78fb9ab090e1637f57013cd5065f5be0fc9a82229458"
+}

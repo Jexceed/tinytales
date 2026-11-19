@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import ImageIO
+import os
 
 struct GeneratedArtwork { var data: Data; var caption: String; var source: Story? = nil; var fileExtension = "png" }
 struct IllustrationRequest {
@@ -26,7 +27,8 @@ struct StoryArtwork: Codable, Equatable {
     var caption: String = ""
     var fileExtension = "png"
     var storyHash: String { SHA256.hash(data:Data(storyText.utf8)).map { String(format:"%02x",$0) }.joined() }
-    var url: URL { ArtworkArchive.directory.appendingPathComponent(id + (fileExtension == "jpg" ? ".jpg" : ".png")) }
+    func url(in directory: URL) -> URL { directory.appendingPathComponent(id + (fileExtension == "jpg" ? ".jpg" : ".png")) }
+    var url: URL { url(in:ArtworkArchive.directory) }
 }
 extension StoryArtwork {
     enum CodingKeys: String, CodingKey { case id, storyID, title, storyText, caption, fileExtension }
@@ -42,6 +44,11 @@ enum ArtworkArchive {
     // Production keeps its managed directory. Test executables and isolated
     // launch fixtures replace this before constructing any model or store.
     static var directory: URL = AppResources.supportDirectory.appendingPathComponent("artwork",isDirectory:true)
+    private static let writes = OSAllocatedUnfairLock(initialState:UInt64(0))
+    static var revision: UInt64 { writes.withLock { $0 } }
+    static func savedAt(_ art: StoryArtwork) -> Date? {
+        try? art.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
     static func save(_ artwork: StoryArtwork, data: Data) throws {
         guard UUID(uuidString:artwork.id) != nil else { throw PartnerError.message("配图记录不可用。") }
         guard let source = CGImageSourceCreateWithData(data as CFData,nil), let image = CGImageSourceCreateImageAtIndex(source,0,nil), image.width > 0, image.height > 0, image.width <= 4096, image.height <= 4096 else { throw PartnerError.message("这张画没有生成完整，请再试一次。") }
@@ -49,14 +56,71 @@ enum ArtworkArchive {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         try data.write(to:artwork.url,options:.atomic)
         try JSONEncoder().encode(artwork).write(to:directory.appendingPathComponent(artwork.id+".json"),options:.atomic)
+        writes.withLock { $0 &+= 1 }
     }
-    static func remove(_ artwork: StoryArtwork) { guard UUID(uuidString:artwork.id) != nil else { return }; try? FileManager.default.removeItem(at:artwork.url);try? FileManager.default.removeItem(at:directory.appendingPathComponent(artwork.id+".json")) }
+    static func remove(_ artwork: StoryArtwork) {
+        guard UUID(uuidString:artwork.id) != nil else { return }
+        let removedImage = (try? FileManager.default.removeItem(at:artwork.url)) != nil
+        let removedRecord = (try? FileManager.default.removeItem(at:directory.appendingPathComponent(artwork.id+".json"))) != nil
+        if removedImage || removedRecord { writes.withLock { $0 &+= 1 } }
+    }
     static func clear(storyID: String? = nil, keepingIDs: Set<String> = []) {
         guard directory.path == directory.resolvingSymlinksInPath().path else { return }
         for file in (try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:nil)) ?? [] where file.pathExtension == "json" {
             guard let data=try? Data(contentsOf:file),let art=try? JSONDecoder().decode(StoryArtwork.self,from:data),!keepingIDs.contains(art.id),storyID == nil || art.storyID == storyID else {continue}
             remove(art)
         }
+    }
+}
+
+/// A read-only index of archived image files. Live conversations own their pictures through their messages.
+struct ArtworkThumbnailIndex: Sendable {
+    struct Version: Equatable, Sendable {
+        let directory: URL
+        let modified: Date
+        let fileNumber: UInt64?
+        let appRevision: UInt64
+
+        init?(_ directory: URL) {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath:directory.path),
+                  attributes[.type] as? FileAttributeType == .typeDirectory,
+                  let modified = attributes[.modificationDate] as? Date else { return nil }
+            self.directory = directory
+            self.modified = modified
+            self.fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+            self.appRevision = ArtworkArchive.revision
+        }
+    }
+    private struct Entry: Sendable {
+        let url: URL
+        let modified: Date
+    }
+    private var entries: [String:[Entry]] = [:]
+
+    static func load(from directory: URL) -> Self {
+        var index = Self()
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey]
+        guard directory.path == directory.resolvingSymlinksInPath().path,
+              let files = try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:Array(keys)) else { return index }
+        for file in files where file.pathExtension == "json" {
+            if Task.isCancelled { return Self() }
+            let id = file.deletingPathExtension().lastPathComponent
+            guard UUID(uuidString:id) != nil, let metadata = try? file.resourceValues(forKeys:keys),
+                  metadata.isRegularFile == true, metadata.isSymbolicLink != true,
+                  let data = try? Data(contentsOf:file), let art = try? JSONDecoder().decode(StoryArtwork.self,from:data),
+                  art.id == id else { continue }
+            let url = art.url(in:directory)
+            guard let image = try? url.resourceValues(forKeys:keys), image.isRegularFile == true,
+                  image.isSymbolicLink != true, let date = image.contentModificationDate else { continue }
+            index.entries[art.storyID,default:[]].append(Entry(url:url, modified:date))
+        }
+        for id in index.entries.keys {
+            index.entries[id]?.sort { $0.modified == $1.modified ? $0.url.lastPathComponent < $1.url.lastPathComponent : $0.modified > $1.modified }
+        }
+        return index
+    }
+    func cover(for storyID:String, savedBy cutoff:Date = .distantFuture) -> URL? {
+        entries[storyID]?.first { $0.modified <= cutoff && FileManager.default.fileExists(atPath:$0.url.path) }?.url
     }
 }
 enum PictureRequest: Equatable {

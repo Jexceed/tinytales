@@ -29,7 +29,7 @@ for feature, prefix, suites in [
     ("004-conversation-artwork", "AI", [("ArtworkTests.swift", "NativeTests.swift", "artworkTestCases()")]),
     ("002-lily-pet-behaviors", "PB", [("PetBehaviorTests.swift", "NativeTests.swift", "petBehaviorTestCases()")]),
     ("006-classical-knowledge", "CK", [("ClassicalKnowledgeTests.swift", "NativeTests.swift", "classicalKnowledgeTestCases()"), ("ClassicalKnowledgePhoneTests.swift", "PhoneTests.swift", "classicalKnowledgePhoneTestCases()")]),
-    ("011-playful-main-ui", "UI", [("PlayfulUITests.swift", "NativeTests.swift", "playfulUITestCases()")]),
+    ("011-playful-main-ui", "UI", [("PlayfulUITests.swift", "NativeTests.swift", "playfulUITestCases()"), ("ConversationToolPhoneTests.swift", "PhoneTests.swift", "conversationToolPhoneTestCases()")]),
     ("010-conversation-tools", "TL", [("ConversationToolTests.swift", "NativeTests.swift", "conversationToolTestCases()"), ("ConversationToolPhoneTests.swift", "PhoneTests.swift", "conversationToolPhoneTestCases()"), ("CallBoundaryTests.swift", "PhoneTests.swift", "callBoundaryTests()")]),
 ]:
     spec = ROOT / f"specs/{feature}/spec.md"

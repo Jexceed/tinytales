@@ -85,7 +85,7 @@ struct CallActivityPanel: View {
     var body: some View {
         VStack(alignment:.leading,spacing:12) {
           HStack(spacing:18) {
-            CallActivityOrb(mode:model.callVisualMode,level:model.callVisualLevel,size:54)
+            LilyCallBadge(mode:model.callVisualMode,level:model.callVisualLevel,size:56)
             VStack(alignment:.leading,spacing:6) {
                 Text(model.callStatusTitle).font(.system(size:21,weight:.bold,design:.rounded))
                 if let phone=model.phone,phone.state == .speaking,!phone.listeningHint.isEmpty {
@@ -116,7 +116,7 @@ struct VoiceCallControls:View {
                     .buttonStyle(.borderedProminent).tint(Color(red:0.80,green:0.24,blue:0.32)).disabled(model.phone?.canStopCurrentTurn != true).help("停止本轮，保持电话接通")
                 if model.phone?.hasPendingVoiceInput == true,!model.isCorrectingVoice {
                     Button("取消这句") {model.cancelVoiceInput()}
-                    if model.phone?.inputTranscript.isEmpty == false {Button("改文字") {model.editVoiceInput()}}
+                    if model.phone?.inputTranscript.isEmpty == false {Button(VoiceFixLabels.edit) {model.editVoiceInput()}}
                 }
                 if model.phone?.verifyingInput == true {ProgressView().controlSize(.small).accessibilityLabel("正在听清这句话")}
                 Spacer(minLength:0)
@@ -125,7 +125,7 @@ struct VoiceCallControls:View {
             else if compact,let phone=model.phone,let id=phone.latestVoiceInputID,let text=phone.latestVoiceInputText {
                 VStack(alignment:.leading,spacing:7) {
                     Text("刚才："+text).font(.system(size:14)).lineLimit(2)
-                    HStack(spacing:16) {Button("重说") {model.retryVoiceInput(id)};Button("改文字") {model.editVoiceInput(id)}}.font(.system(size:14,weight:.medium))
+                    HStack(spacing:16) {Button(VoiceFixLabels.retry) {model.retryVoiceInput(id)};Button(VoiceFixLabels.edit) {model.editVoiceInput(id)}}.font(.system(size:14,weight:.medium))
                 }
             }
         }

@@ -79,9 +79,42 @@ struct LilyAvatar: View {
     }
 }
 
+/// Compact action chip under the child's voice bubble (重说 / 修改).
+/// 重说 is the child's own action (filled warm coral); 修改 is a quieter outline chip.
+struct VoiceFixChip: View {
+    enum Emphasis { case primary, secondary }
+    var title: String
+    var symbol: String
+    var emphasis: Emphasis = .secondary
+    var action: () -> Void
+    private static let coral = Color(red: 0.93, green: 0.52, blue: 0.38)
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 10, weight: .bold))
+                Text(title).font(.system(size: 12, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(emphasis == .primary ? Color.white : Color.sage)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(Capsule().fill(emphasis == .primary ? AnyShapeStyle(LinearGradient(colors: [Color.peachEdge, Self.coral], startPoint: .top, endPoint: .bottom)) : AnyShapeStyle(Color.card)))
+            .overlay(Capsule().strokeBorder(emphasis == .primary ? Color.white.opacity(0.35) : Color.lilacEdge.opacity(0.7), lineWidth: 1))
+            .contentShape(Capsule())
+        }.buttonStyle(StoryButtonStyle()).hoverLift()
+    }
+}
+
 struct ChildAvatar: View {
     var size: CGFloat = 30
+    private static let portrait: NSImage? = Bundle.main.resourceURL.flatMap { NSImage(contentsOf: $0.appendingPathComponent("Brand/child-avatar.png")) }
     var body: some View {
+        if let portrait = Self.portrait {
+            Image(nsImage: portrait).resizable().interpolation(.high).scaledToFill()
+                .frame(width: size, height: size).clipShape(Circle())
+                .overlay(Circle().strokeBorder(LinearGradient(colors: [Color.peachEdge, Color.lemonEdge], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: max(1.5, size * 0.06)))
+                .accessibilityHidden(true)
+        } else { fallback }
+    }
+    private var fallback: some View {
         Image(systemName: "face.smiling.fill").font(.system(size: size * 0.62, weight: .semibold)).foregroundStyle(.white)
             .frame(width: size, height: size)
             .background(Circle().fill(LinearGradient(colors: [Color(red: 1, green: 0.80, blue: 0.30), Color(red: 0.98, green: 0.58, blue: 0.30)], startPoint: .top, endPoint: .bottom)))
@@ -319,5 +352,174 @@ struct BubbleTail: Shape {
 extension CallVisualMode {
     var stageActivity: StageActivity {
         switch self { case .idle: return .idle; case .connecting: return .connecting; case .listening: return .listening; case .thinking: return .thinking; case .speaking: return .speaking; case .muted: return .muted }
+    }
+}
+
+// MARK: 0.21.0 child-perspective additions
+
+/// Small downscaled thumbnails for the sidebar; never decodes the full picture per render.
+@MainActor enum ArtworkThumbnails {
+    private static let cache = NSCache<NSString, NSImage>()
+    static func image(at url: URL, pixels: Int = 120) -> NSImage? {
+        let key = "\(url.path)-\(pixels)" as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: pixels, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        cache.setObject(image, forKey: key)
+        return image
+    }
+}
+
+/// Big primary action for children who cannot read or type yet.
+struct WelcomeTalkButton: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        Button { model.toggleCall() } label: {
+            TimelineView(.animation(minimumInterval: 1 / 20, paused: reduceMotion)) { timeline in
+                let glow = reduceMotion ? 0.5 : (sin(timeline.date.timeIntervalSinceReferenceDate * 2.4) + 1) / 2
+                HStack(spacing: 14) {
+                    Image(systemName: "mic.fill").font(.system(size: 24, weight: .bold)).foregroundStyle(Color.sage)
+                        .frame(width: 48, height: 48).background(Circle().fill(Color.card))
+                    Text("和莉莉说话").font(.system(size: 24, weight: .heavy, design: .rounded)).foregroundStyle(.white)
+                }
+                .padding(.leading, 10).padding(.trailing, 30).frame(height: 68)
+                .background(Capsule().fill(lilyGradient))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.35), lineWidth: 1.5))
+                .shadow(color: Color.sage.opacity(0.22 + glow * 0.2), radius: 8 + glow * 8, x: 0, y: 4)
+            }
+        }
+        .buttonStyle(StoryButtonStyle()).hoverLift()
+        .help("给莉莉打电话").accessibilityLabel("和莉莉说话，开始通话")
+    }
+}
+
+/// Lily herself in the call panel: pose follows the real call state; colour ring and
+/// status symbol keep the existing state language.
+struct LilyCallBadge: View {
+    var mode: CallVisualMode
+    var level: Double = 0
+    var size: CGFloat = 58
+    @State private var start = Date()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        let activity = mode.stageActivity
+        TimelineView(.animation(minimumInterval: 1 / 24, paused: reduceMotion || activity == .idle || activity == .muted)) { timeline in
+            let elapsed = timeline.date.timeIntervalSince(start)
+            let pose = LilyStage.pose(activity: activity, cheering: false, elapsed: elapsed, reduceMotion: reduceMotion)
+            let lively = activity == .listening || activity == .speaking
+            let pulse = lively && !reduceMotion ? PlayfulMotion.haloScale(level: level, elapsed: elapsed, reduceMotion: false) : 1
+            ZStack {
+                Circle().fill(mode.color.opacity(0.16)).scaleEffect(pulse * 1.06)
+                LilyPoseImage(pose: pose).padding(size * 0.05)
+                    .frame(width: size, height: size)
+                    .background(Circle().fill(Color.card))
+                    .clipShape(Circle())
+                    .overlay(Circle().strokeBorder(mode.color, lineWidth: 3))
+                if activity == .connecting || activity == .thinking {
+                    Circle().trim(from: 0.05, to: 0.6).stroke(mode.color.opacity(0.85), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .frame(width: size + 8, height: size + 8)
+                        .rotationEffect(.degrees(reduceMotion ? 0 : elapsed * 140))
+                }
+            }
+            .frame(width: size + 12, height: size + 12)
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: activity.badgeSymbol).font(.system(size: size * 0.2, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: size * 0.38, height: size * 0.38).background(Circle().fill(mode.color))
+                    .overlay(Circle().strokeBorder(Color.card, lineWidth: 2))
+            }
+        }.accessibilityElement().accessibilityLabel(mode.label)
+    }
+}
+
+/// Waiting scene while Lily draws: colour blobs slowly bloom inside a little canvas.
+struct PaintingBubble: View {
+    var text: String
+    @State private var start = Date()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private static let blobs: [(x: Double, y: Double, r: Double, color: Color, delay: Double)] = [
+        (0.28, 0.40, 0.30, .peachEdge, 0), (0.70, 0.35, 0.26, .skyDeep, 0.12), (0.50, 0.70, 0.28, .mintEdge, 0.24),
+        (0.20, 0.75, 0.18, .lilyPink, 0.36), (0.82, 0.72, 0.20, .lemonEdge, 0.48)
+    ]
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            LilyAvatar(size: 44, pose: .speaking)
+            TimelineView(.animation(minimumInterval: 1 / 20, paused: reduceMotion)) { timeline in
+                let fill = PaintingStatus.fill(elapsed: timeline.date.timeIntervalSince(start), reduceMotion: reduceMotion)
+                Canvas { context, size in
+                    for blob in Self.blobs {
+                        let local = min(1, max(0, (fill - blob.delay) / (1 - blob.delay)))
+                        guard local > 0 else { continue }
+                        let radius = blob.r * Double(min(size.width, size.height)) * (0.3 + local * 0.9)
+                        let rect = CGRect(x: blob.x * size.width - radius, y: blob.y * size.height - radius, width: radius * 2, height: radius * 2)
+                        context.fill(Path(ellipseIn: rect), with: .color(blob.color.opacity(0.55 * local + 0.15)))
+                    }
+                }
+                .frame(width: 128, height: 88)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.card))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color.peach.opacity(0.7)))
+                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.peachEdge.opacity(0.6), lineWidth: 1.5))
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "paintbrush.pointed.fill").font(.system(size: 20, weight: .bold)).foregroundStyle(Color.lilyPink)
+                        .rotationEffect(.degrees(reduceMotion ? 0 : sin(timeline.date.timeIntervalSinceReferenceDate * 3) * 12))
+                        .offset(x: 8, y: 6)
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(text).font(.system(size: 17, weight: .semibold, design: .rounded)).foregroundStyle(Color.quiet)
+                BouncingDots(color: .lilyPink, size: 7)
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 22).fill(Color.card))
+        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(Color.lilacEdge.opacity(0.45)))
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine).accessibilityLabel(text)
+    }
+}
+
+/// One-time burst of stars and hearts around a picture that was just saved.
+struct CelebrationBurst: View {
+    let start: Date
+    private static let colors: [Color] = [.lemonEdge, .lilyPink, .skyDeep, .mintEdge, .peachEdge, .sage]
+    var body: some View {
+        TimelineView(.explicit(PlayfulMotion.celebrationFrames(start:start))) { timeline in
+            let progress = timeline.date.timeIntervalSince(start) / PlayfulMotion.celebrationDuration
+            if progress < 1 {
+                GeometryReader { geometry in
+                    let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                    let reach = Double(min(geometry.size.width, geometry.size.height)) * 0.55
+                    ForEach(0..<PlayfulMotion.celebrationParticles, id: \.self) { index in
+                        let angle = Double(index) / Double(PlayfulMotion.celebrationParticles) * 2 * .pi
+                        let distance = reach * (0.3 + progress * 0.7)
+                        Image(systemName: index.isMultiple(of: 3) ? "heart.fill" : "star.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(Self.colors[index % Self.colors.count])
+                            .scaleEffect(0.6 + progress * 0.7)
+                            .opacity(1 - progress)
+                            .position(x: center.x + CGFloat(cos(angle) * distance), y: center.y + CGFloat(sin(angle) * distance))
+                    }
+                }
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
+/// Diagnostics only (`--capture-playful-gallery`): time-dependent child-facing states in one still.
+struct PlayfulGallery: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            PaintingBubble(text: "莉莉在画画…")
+            HStack(spacing: 30) {
+                ForEach([CallVisualMode.connecting, .listening, .thinking, .speaking, .muted], id: \.rawValue) { mode in
+                    VStack(spacing: 10) { LilyCallBadge(mode: mode, level: 0.6, size: 58); Text(mode.label).font(.system(size: 14, weight: .semibold, design: .rounded)) }
+                }
+            }
+            RoundedRectangle(cornerRadius: 20).fill(LinearGradient(colors: [.mint, .sky], startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 300, height: 170).overlay(CelebrationBurst(start: Date().addingTimeInterval(-0.45)))
+        }.padding(30).frame(width: 760, height: 560, alignment: .topLeading).foregroundStyle(Color.ink).background(StorySkyBackdrop())
     }
 }

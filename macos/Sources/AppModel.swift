@@ -9,6 +9,7 @@ import Combine
     var work:Task<Void,Never>?
     var requestID=UUID()
     var streamingID:UUID?
+    var openedArchive: (storyID:String, openedAt:Date, cover:URL?)?
 }
 
 @MainActor final class AppModel: ObservableObject {
@@ -65,6 +66,11 @@ import Combine
     private let callFactory: ((LocalStore,String,String,StorySession)->RealtimeCall)?
     private let now: () -> Date
     private let replySpeaker:((String)->Void)?
+    private let loadArtworkIndex: @Sendable (URL) -> ArtworkThumbnailIndex
+    @Published private var archiveIndex = ArtworkThumbnailIndex()
+    private var archiveVersion: ArtworkThumbnailIndex.Version?
+    private var archiveLoad: Task<Void,Never>?
+    private var celebrations = ArtworkCelebrations()
     private var authorizedKey: String?
     private var connectionKey: String? { authorizedKey }
     private var engine:CompanionEngine? {conversationRuntimes[selectedConversationID]?.engine}
@@ -134,10 +140,11 @@ import Combine
         if phone.muted { return "麦克风已静音" }
         switch phone.state { case .connecting: return "正在接通…"; case .listening: return "已接通，想说什么就说吧"; case .thinking: return "莉莉正在想一想…"; case .speaking: return "莉莉正在说，你也可以接话"; case .ended: return "通话已结束" }
     }
-    init(store: LocalStore, keyProvider: @escaping () -> String? = Credentials.load, modelFactory: @escaping (String) -> PartnerModel = { OpenAIClient(key: $0) }, callFactory: ((LocalStore,String,String,StorySession)->RealtimeCall)? = nil, now: @escaping () -> Date = Date.init, replySpeaker:((String)->Void)? = nil) {
+    init(store: LocalStore, keyProvider: @escaping () -> String? = Credentials.load, modelFactory: @escaping (String) -> PartnerModel = { OpenAIClient(key: $0) }, callFactory: ((LocalStore,String,String,StorySession)->RealtimeCall)? = nil, now: @escaping () -> Date = Date.init, loadArtworkIndex: @escaping @Sendable (URL) -> ArtworkThumbnailIndex = { ArtworkThumbnailIndex.load(from:$0) }, replySpeaker:((String)->Void)? = nil) {
         self.store = store; self.keyProvider = keyProvider; self.modelFactory = modelFactory; self.callFactory=callFactory
         self.now=now
         self.replySpeaker=replySpeaker
+        self.loadArtworkIndex=loadArtworkIndex
         authorizedKey = keyProvider()
         cloudAvailable = connectionKey != nil
         refresh(); newConversation()
@@ -145,6 +152,56 @@ import Combine
     func refresh() {
         do { stories = try store.stories().filter { $0.source == "cloud" }; memories = try store.memories(); settings = try store.settings(); operations = try store.usage().operations; rememberSidebarPositions() }
         catch { self.error = error.localizedDescription }
+        refreshArchivedThumbnails()
+    }
+    deinit { archiveLoad?.cancel() }
+    private func refreshArchivedThumbnails() {
+        let version = stories.isEmpty ? nil : ArtworkThumbnailIndex.Version(ArtworkArchive.directory)
+        guard version != archiveVersion else { return }
+        archiveLoad?.cancel()
+        if archiveVersion?.directory != version?.directory { archiveIndex = ArtworkThumbnailIndex() }
+        archiveVersion = version
+        guard let version else { archiveLoad=nil; return }
+        let load = loadArtworkIndex
+        archiveLoad = Task.detached(priority:.utility) { [weak self] in
+            let index = load(version.directory)
+            guard !Task.isCancelled else { return }
+            await self?.receiveArtworkIndex(index,version:version)
+        }
+    }
+    private func receiveArtworkIndex(_ index:ArtworkThumbnailIndex, version:ArtworkThumbnailIndex.Version) {
+        guard !Task.isCancelled, archiveVersion == version else { return }
+        guard ArtworkThumbnailIndex.Version(ArtworkArchive.directory) == version else { refreshArchivedThumbnails(); return }
+        archiveIndex=index
+        archiveLoad=nil
+    }
+    /// Only a persisted archive row looks up a book-wide cover. Two live conversations can share a book.
+    func thumbnailURL(for item:ConversationItem) -> URL? {
+        if let storyID=item.storyID, item.id == "archive:"+storyID { return archiveIndex.cover(for:storyID) }
+        let history = item.id == selectedConversationID ? messages : conversationCache[item.id]?.messages ?? []
+        var gallery: URL?
+        for message in history.reversed() where !message.isRetracted {
+            if let url=message.artwork?.url, FileManager.default.fileExists(atPath:url.path) { return url }
+            if gallery == nil, let id=message.sceneID { gallery=Scene.all.first { $0.id==id }?.url }
+        }
+        if let gallery { return gallery }
+        guard let opened=conversationRuntimes[item.id]?.openedArchive, opened.storyID==item.storyID else { return nil }
+        if let url=opened.cover, FileManager.default.fileExists(atPath:url.path) { return url }
+        return archiveIndex.cover(for:opened.storyID,savedBy:opened.openedAt)
+    }
+    /// Big "talk to Lily" entry on a blank conversation (spec 011 UI-007).
+    var showsWelcomeTalkButton:Bool { !inCall && !busy && !isConversationStarted }
+    /// Word cards read aloud outside calls only, so they never compete with the call audio (UI-011).
+    var canReadWords:Bool { !inCall && !busy }
+    func canReadWord(in message:ChatMessage) -> Bool {
+        canReadWords && !message.isUser && !message.isStreaming && !message.isRetracted && message.word != nil
+    }
+    func readWord(in messageID:UUID) {
+        guard let message=messages.first(where:{ $0.id==messageID }), canReadWord(in:message), let word=message.word else { return }
+        voice.speak(word.readAloudText)
+    }
+    func beginArtworkCelebration(_ art:StoryArtwork, reduceMotion:Bool) -> Date? {
+        celebrations.begin(id:art.id,savedAt:ArtworkArchive.savedAt(art),now:Date(),reduceMotion:reduceMotion)
     }
     private var history: [[String: Any]] {
         let eligible = messages.compactMap { message -> [String:Any]? in
@@ -257,6 +314,9 @@ import Combine
         if conversationRuntimes[target.id] == nil {
             let context=runtime(for:target.id)
             context.session.current=target.story;context.session.currentPictureID=target.pictureID
+            if let storyID=target.linkedStoryID, id == "archive:"+storyID {
+                context.openedArchive=(storyID,Date(),archiveIndex.cover(for:storyID))
+            }
         }
         conversationCache[target.id]?.hasUnreadReply=false
         configureVoice();configureEngine()

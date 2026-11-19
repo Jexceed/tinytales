@@ -2,6 +2,30 @@ import Foundation
 
 @MainActor func conversationToolPhoneTestCases() -> [(String, @MainActor () async throws -> Void)] {
     [
+        ("UI-017 hanging up after Lily's greeting restores the big talk button and keeps the draft", {
+            for local in [true,false] {
+                let store=try phoneFixture(), wire=TestWire(), speech=FakeTeacherSpeech(), model=ControlledConversationModel()
+                var settings=try store.settings();settings.speaks=false;try store.setSettings(settings)
+                let app=AppModel(store:store,keyProvider:{"fixture"},modelFactory:{_ in model},callFactory:{ store,_,_,session in
+                    RealtimeCall(store:store,wire:wire,audio:SilentCallAudio(),permission:{true},voice:local ? "teacher" : "shimmer",session:session,inputCommitDelay:0,teacherSpeech:local ? speech : nil)
+                })
+                defer {app.cancel();speech.finish();model.releaseAll();try? FileManager.default.removeItem(at:store.url.deletingLastPathComponent())}
+                app.draft="等会聊小船";app.toggleCall();await settle()
+                wire.emit(["type":"session.created"]);await settle();wire.emit(["type":"session.updated"]);await settle()
+                if !local {
+                    wire.emit(["type":"response.created","response":["id":"greeting"]]);await settle()
+                    wire.emit(["type":"response.done","response":["id":"greeting","status":"completed","output":[["type":"message","id":"hello","content":[["text":"我在呢，想说什么就说吧。"]]]]]]);await settle()
+                }
+                try await waitFor({ app.messages.contains{$0.source != "welcome"} },seconds:1)
+                try require(!app.showsWelcomeTalkButton && !app.canReadWords,"idle actions were active inside the call")
+                app.toggleCall();await settle()
+                try require(app.showsWelcomeTalkButton && !app.showsOpeningOptions && !app.isConversationStarted && app.conversations.isEmpty,"greeting alone removed the blank voice entry")
+                try require(app.draft=="等会聊小船" && app.messages.contains{$0.source != "welcome"},"reopening the welcome discarded the draft or the greeting")
+                app.send();try await backgroundWait{model.requests.count==1}
+                try require(!app.showsWelcomeTalkButton && app.conversations.count==1,"real user input did not end the welcome")
+                model.finish(0,"小船靠岸了。");try await backgroundWait{!app.busy}
+            }
+        }),
         ("TL-006 greetings and budget exhaustion keep the microphone session available for the next request", {
             let store = try phoneFixture(), wire = TestWire()
             let call = RealtimeCall(store:store,wire:wire,audio:SilentCallAudio())
